@@ -46,9 +46,11 @@ def normalizar_nome_arquivo(nome):
     return re.sub(r'_+', '_', limpo).strip('_')
 
 def identificar_perfil_pelo_doc(valor):
-    """ Regra Binária: 14 digitos = Frotista | Resto = Freteiro """
+    """ Regra Binária: 14 = Frotista | Resto = Freteiro (Cobre 100% da base) """
     if pd.isna(valor): return "FRETEIRO"
-    doc_limpo = re.sub(r'\D', '', str(valor))
+    val_str = str(valor)
+    if val_str.endswith('.0'): val_str = val_str[:-2]
+    doc_limpo = re.sub(r'\D', '', val_str)
     if len(doc_limpo) == 14: return "PEQUENO FROTISTA"
     else: return "FRETEIRO"
 
@@ -73,27 +75,57 @@ def tratar_celular_discador(val):
     return None, tipo
 
 # ==============================================================================
-# 3. MOTORES DE PROCESSAMENTO
+# 3. MOTORES DE PROCESSAMENTO & BALANCEAMENTO JUSTO
 # ==============================================================================
 
-def distribuir_leads_orfãos(df, col_resp):
+def distribuir_leads_orfãos(df, col_resp, col_prioridade=None):
+    """
+    Distribui leads 'sem dono' (Backlog total) garantindo equidade.
+    Se 'col_prioridade' existir, ordena antes de distribuir para garantir qualidade igual.
+    """
     df_proc = df.copy()
     termos_ignorar = ['CANAL TELEVENDAS', 'TIME', 'EQUIPE', 'TELEVENDAS', 'NULL', 'NAN', '']
+    
+    # 1. Identifica Equipe Humana
     todos_resp = df_proc[col_resp].unique()
     agentes_humanos = [a for a in todos_resp if pd.notna(a) and str(a).strip().upper() not in termos_ignorar]
     
-    if not agentes_humanos: return df_proc, "Sem agentes humanos.", 0
+    if not agentes_humanos: return df_proc, "Sem equipe humana disponível.", 0
+
+    # 2. Identifica Órfãos (Tudo que não tem dono humano)
     mask_orfao = df_proc[col_resp].isna() | df_proc[col_resp].astype(str).str.strip().str.upper().isin(termos_ignorar)
-    qtd_orfaos = mask_orfao.sum()
-    if qtd_orfaos == 0: return df_proc, "Base completa.", 0
+    
+    # Se tiver coluna de prioridade, ORDENA os órfãos antes de distribuir
+    # Isso garante que os primeiros (VIPs) sejam divididos 1 pra 1
+    if col_prioridade and col_prioridade in df_proc.columns:
+        # Ordena o DataFrame inteiro (ou apenas a fatia, mas aqui vamos reordenar o índice da mask)
+        # Estratégia: Pegar os índices dos órfãos ordenados
+        indices_orfaos = df_proc[mask_orfao].sort_values(by=col_prioridade, ascending=True).index
+    else:
+        indices_orfaos = df_proc[mask_orfao].index
+
+    qtd_orfaos = len(indices_orfaos)
+    
+    if qtd_orfaos == 0: return df_proc, "Base já está distribuída.", 0
+
+    # 3. Distribuição Round-Robin (Um pra mim, um pra você...) na lista já ordenada
     atribuicoes = np.resize(agentes_humanos, qtd_orfaos)
-    df_proc.loc[mask_orfao, col_resp] = atribuicoes
-    return df_proc, f"Sucesso! {qtd_orfaos} leads redistribuídos.", qtd_orfaos
+    
+    # Aplica usando os índices ordenados
+    df_proc.loc[indices_orfaos, col_resp] = atribuicoes
+    
+    msg_extra = f" (Ordenado por '{col_prioridade}')" if col_prioridade else ""
+    return df_proc, f"Sucesso! {qtd_orfaos} leads do Backlog distribuídos igualmente{msg_extra}.", qtd_orfaos
 
 def processar_discador(df, col_id, cols_tel, col_resp, col_doc):
     df_trab = df.copy()
     df_trab['ESTRATEGIA_PERFIL'] = df_trab[col_doc].apply(identificar_perfil_pelo_doc)
+    
     cols_para_manter = col_id + [col_resp, 'ESTRATEGIA_PERFIL']
+    
+    # Se houver coluna de prioridade no DF original, tenta manter ela (opcional, mas bom pra conferência)
+    # Não vamos forçar para não quebrar o melt se o usuário não selecionar
+    
     df_melted = df_trab.melt(id_vars=cols_para_manter, value_vars=cols_tel, var_name='Origem', value_name='Telefone_Bruto')
     df_melted['Telefone_Tratado'], df_melted['Tipo'] = zip(*df_melted['Telefone_Bruto'].apply(tratar_celular_discador))
     df_final = df_melted.dropna(subset=['Telefone_Tratado'])
@@ -118,35 +150,44 @@ def processar_feedback_tarde(df_mestre, df_log, col_id_mestre, col_id_log, col_r
 
 def gerar_zip_dinamico(df_dados, col_resp, col_segmentacao, modo="DISCADOR"):
     zip_buffer = io.BytesIO()
+    col_seg_uso = 'ESTRATEGIA_PERFIL' if modo == "DISCADOR" else col_segmentacao
+    
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         if col_resp not in df_dados.columns:
             df_dados['RESP_GERAL'] = 'EQUIPE'
             col_resp = 'RESP_GERAL'
+            
         agentes = df_dados[col_resp].unique()
+
         for agente in agentes:
-            nome_arquivo = normalizar_nome_arquivo(agente)
+            nome_agente = normalizar_nome_arquivo(agente)
             if pd.isna(agente): df_agente = df_dados[df_dados[col_resp].isna()]
             else: df_agente = df_dados[df_dados[col_resp] == agente]
+            
             if df_agente.empty: continue
 
             if modo == "FEEDBACK_TARDE":
                 data = io.BytesIO()
                 df_agente.to_excel(data, index=False)
-                zip_file.writestr(f"DISCADOR_{nome_arquivo}_REFORCO_TARDE_Frotista.xlsx", data.getvalue())
+                zip_file.writestr(f"{nome_agente}/DISCADOR_REFORCO_TARDE.xlsx", data.getvalue())
+            
             else:
-                col_seg_uso = 'ESTRATEGIA_PERFIL' if modo == "DISCADOR" else col_segmentacao
+                # SEPARAÇÃO RIGOROSA
                 df_frotista = df_agente[df_agente[col_seg_uso] == "PEQUENO FROTISTA"]
                 df_freteiro = df_agente[df_agente[col_seg_uso] == "FRETEIRO"]
+                
                 prefixo = "DISCADOR" if modo == "DISCADOR" else "MAILING"
-                pasta = nome_arquivo
+                
                 if not df_frotista.empty:
                     data = io.BytesIO()
                     df_frotista.to_excel(data, index=False)
-                    zip_file.writestr(f"{pasta}/{prefixo}_1_MANHA_Frotista_CNPJ.xlsx", data.getvalue())
+                    zip_file.writestr(f"{nome_agente}/{prefixo}_1_MANHA_Frotista_CNPJ.xlsx", data.getvalue())
+                
                 if not df_freteiro.empty:
                     data = io.BytesIO()
                     df_freteiro.to_excel(data, index=False)
-                    zip_file.writestr(f"{pasta}/{prefixo}_2_ALMOCO_Freteiro_CPF.xlsx", data.getvalue())
+                    zip_file.writestr(f"{nome_agente}/{prefixo}_2_ALMOCO_Freteiro_CPF.xlsx", data.getvalue())
+
     zip_buffer.seek(0)
     return zip_buffer
 
@@ -158,7 +199,7 @@ st.title("🚛 Michelin Pilot Command Center")
 st.markdown("### Estratégia de Televentas & Logística")
 st.markdown("---")
 
-# SIDEBAR UNIFICADA
+# BARRA LATERAL
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Michelin_Logo.svg/1200px-Michelin_Logo.svg.png", width=150)
     st.header("🎮 Controle")
@@ -201,41 +242,45 @@ if uploaded_file:
             sug_id = [c for c in cols_d if any(x in c.upper() for x in ['ID','NOME'])]
             sug_doc = next((c for c in cols_d if 'CNPJ' in c.upper() or 'CPF' in c.upper()), None)
             sug_resp = next((c for c in cols_d if 'RESPONSAVEL' in c.upper()), cols_d[0])
-            
-            with st.expander("⚙️ Configurar Colunas", expanded=True):
+            sug_prio = next((c for c in cols_d if 'PRIORIDADE' in c.upper() or 'AGING' in c.upper() or 'SCORE' in c.upper()), None)
+
+            with st.expander("⚙️ Configurar Colunas & Balanceamento", expanded=True):
                 c1, c2 = st.columns(2)
                 sel_resp_d = c1.selectbox("Responsável:", cols_d, index=cols_d.index(sug_resp) if sug_resp in cols_d else 0)
                 sel_doc_d = c1.selectbox("CPF/CNPJ:", cols_d, index=cols_d.index(sug_doc) if sug_doc in cols_d else 0)
                 sel_id_d = c2.multiselect("ID Cliente:", cols_d, default=sug_id[:3])
                 sel_tel_d = c2.multiselect("Telefones:", cols_d, default=sug_tel)
-                aplicar_bal_d = st.checkbox("Distribuir leads sem dono?", value=True)
+                
+                st.markdown("---")
+                st.markdown("**⚖️ Balanceamento Justo**")
+                aplicar_bal_d = st.checkbox("Distribuir leads 'sem dono'?", value=True)
+                sel_prio_d = None
+                if aplicar_bal_d:
+                    sel_prio_d = st.selectbox("Coluna de Prioridade (Opcional):", ["(Sem Prioridade - Aleatório)"] + cols_d, index=cols_d.index(sug_prio)+1 if sug_prio in cols_d else 0)
+                    if sel_prio_d == "(Sem Prioridade - Aleatório)": sel_prio_d = None
 
             if st.button("🚀 PROCESSAR E CONFERIR", key='btn_d'):
-                with st.spinner("Calculando..."):
+                with st.spinner("Distribuindo Justamente e Processando..."):
                     df_trabalho = df_d.copy()
-                    if aplicar_bal_d: df_trabalho, _, _ = distribuir_leads_orfãos(df_d, sel_resp_d)
+                    
+                    # 1. DISTRIBUIÇÃO JUSTA (COM PRIORIDADE)
+                    if aplicar_bal_d: 
+                        df_trabalho, msg, _ = distribuir_leads_orfãos(df_trabalho, sel_resp_d, sel_prio_d)
+                        st.info(msg)
+                    
+                    # 2. PROCESSAMENTO
                     df_res_d = processar_discador(df_trabalho, sel_id_d, sel_tel_d, sel_resp_d, sel_doc_d)
                     
-                    # --- ÁREA DE CONFERÊNCIA (NOVO) ---
                     st.markdown('<div class="preview-box">', unsafe_allow_html=True)
-                    st.subheader("🔎 Conferência Visual dos Resultados")
-                    
-                    # 1. Tabela Resumo (Pivot Table)
+                    st.subheader("🔎 Conferência Visual")
                     try:
                         resumo = df_res_d.groupby([sel_resp_d, 'ESTRATEGIA_PERFIL']).size().unstack(fill_value=0)
-                        st.write("📊 **Distribuição da Carga por Atendente:**")
+                        st.write("📊 **Carga por Atendente (Linhas):**")
                         st.dataframe(resumo, use_container_width=True)
-                    except:
-                        st.warning("Não foi possível gerar a tabela dinâmica. Verifique os nomes das colunas.")
-
-                    # 2. Amostra de Dados
-                    st.write("👀 **Amostra das primeiras 50 linhas (Dados Tratados):**")
-                    st.dataframe(df_res_d.head(50), use_container_width=True)
+                    except: pass
                     st.markdown('</div>', unsafe_allow_html=True)
 
-                    # Botão Download
                     zip_d = gerar_zip_dinamico(df_res_d, sel_resp_d, None, "DISCADOR") 
-                    st.success("Tudo certo? Baixe o arquivo abaixo:")
                     st.download_button("📥 DOWNLOAD PACK MANHÃ (.ZIP)", zip_d, "Discador_Manha.zip", "application/zip", type="primary")
 
         # --- MAILING ---
@@ -246,35 +291,34 @@ if uploaded_file:
             cols_m = df_m.columns.tolist()
             sug_doc_m = next((c for c in cols_m if 'CNPJ' in c.upper() or 'CPF' in c.upper()), None)
             sug_resp_m = next((c for c in cols_m if 'RESPONSAVEL' in c.upper()), cols_m[0])
+            sug_prio_m = next((c for c in cols_m if 'PRIORIDADE' in c.upper()), None)
             
             with st.expander("⚙️ Configurar Colunas"):
                 c1, c2 = st.columns(2)
                 sel_resp_m = c1.selectbox("Responsável:", cols_m, index=cols_m.index(sug_resp_m) if sug_resp_m in cols_m else 0, key='m_resp')
                 sel_doc_m = c2.selectbox("CPF/CNPJ:", cols_m, index=cols_m.index(sug_doc_m) if sug_doc_m in cols_m else 0, key='m_doc')
                 aplicar_bal_m = st.checkbox("Distribuir leads sem dono?", value=True, key='chk_bal_m')
+                sel_prio_m = None
+                if aplicar_bal_m:
+                    sel_prio_m = st.selectbox("Coluna de Prioridade (Opcional):", ["(Aleatório)"] + cols_m, index=cols_m.index(sug_prio_m)+1 if sug_prio_m in cols_m else 0, key='m_prio')
+                    if sel_prio_m == "(Aleatório)": sel_prio_m = None
             
             if st.button("📦 PROCESSAR E CONFERIR", key='btn_m'):
                 with st.spinner("Calculando..."):
                     df_trabalho_m = df_m.copy()
-                    if aplicar_bal_m: df_trabalho_m, _, _ = distribuir_leads_orfãos(df_m, sel_resp_m)
+                    if aplicar_bal_m: 
+                        df_trabalho_m, msg, _ = distribuir_leads_orfãos(df_trabalho_m, sel_resp_m, sel_prio_m)
+                        st.info(msg)
+                    
                     df_classificado = processar_distribuicao_mailing(df_trabalho_m, sel_doc_m, sel_resp_m)
                     
-                    # --- ÁREA DE CONFERÊNCIA ---
                     st.markdown('<div class="preview-box">', unsafe_allow_html=True)
                     st.subheader("🔎 Conferência Visual")
-                    
-                    # Resumo
                     resumo_m = df_classificado.groupby([sel_resp_m, 'PERFIL_CALCULADO']).size().unstack(fill_value=0)
-                    st.write("📊 **Distribuição:**")
                     st.dataframe(resumo_m, use_container_width=True)
-                    
-                    # Amostra
-                    st.write("👀 **Amostra:**")
-                    st.dataframe(df_classificado.head(20), use_container_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
 
                     zip_m = gerar_zip_dinamico(df_classificado, sel_resp_m, "PERFIL_CALCULADO", "MAILING")
-                    st.success("Mailing Pronto!")
                     st.download_button("📥 DOWNLOAD MAILING (.ZIP)", zip_m, "Mailing.zip", "application/zip", type="primary")
 
     elif modo_operacao == "☀️ Tarde (Reprocessamento)":
@@ -305,6 +349,7 @@ if uploaded_file:
 
                 if st.button("🔄 CONFERIR E GERAR TARDE"):
                     with st.spinner("Cruzando..."):
+                        # Reaplica distribuição para coerência
                         df_trabalho, _, _ = distribuir_leads_orfãos(df_d, sel_resp_d)
                         df_tarde_limpa, qtd = processar_feedback_tarde(df_trabalho, df_log, sel_id_d, col_id_log, sel_resp_d, sel_doc_d)
                         
@@ -312,15 +357,11 @@ if uploaded_file:
                             st.warning("Nenhum registro para tarde.")
                         else:
                             df_res_tarde = processar_discador(df_tarde_limpa, sel_id_d, sel_tel_d, sel_resp_d, sel_doc_d)
-                            
-                            # --- ÁREA DE CONFERÊNCIA ---
                             st.markdown('<div class="preview-box">', unsafe_allow_html=True)
                             st.subheader("🔎 Conferência (Reforço Tarde)")
                             st.write(f"**Removidos pelo Log:** {qtd} contatos.")
-                            st.write(f"**Restantes para Discar:** {len(df_res_tarde)}")
                             st.dataframe(df_res_tarde.head(50), use_container_width=True)
                             st.markdown('</div>', unsafe_allow_html=True)
-
                             zip_tarde = gerar_zip_dinamico(df_res_tarde, sel_resp_d, None, "FEEDBACK_TARDE")
                             st.download_button("📥 DOWNLOAD PACK TARDE", zip_tarde, "Reforco_Tarde.zip", "application/zip", type="primary")
             except Exception as e:
