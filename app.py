@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import io
@@ -7,7 +8,7 @@ import unicodedata
 import numpy as np
 
 # ==============================================================================
-# 1. CONFIGURAÇÃO VISUAL
+# 1. CONFIGURAÇÃO VISUAL (CLEAN)
 # ==============================================================================
 st.set_page_config(
     page_title="Michelin Pilot Command Center",
@@ -29,6 +30,9 @@ st.markdown("""
     div[data-testid="stExpander"] { background-color: white; border-radius: 8px; }
     .audit-box-success { padding: 15px; background-color: #d4edda; color: #155724; border-radius: 8px; border: 1px solid #c3e6cb; margin-bottom: 20px; }
     .audit-box-danger { padding: 15px; background-color: #f8d7da; color: #721c24; border-radius: 8px; border: 1px solid #f5c6cb; margin-bottom: 20px; }
+    
+    /* Destaque para upload na Tab 3 */
+    .upload-log-box { border: 2px dashed #003366; padding: 20px; border-radius: 10px; background-color: #e8f4f8; text-align: center; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -44,7 +48,7 @@ def normalizar_nome_arquivo(nome):
     return re.sub(r'_+', '_', limpo).strip('_')
 
 def identificar_perfil_pelo_doc(valor):
-    """ 14 digitos = Frotista (Manhã/Tarde) | Outros = Freteiro (Almoço) """
+    """ Regra Binária: 14 = Frotista | Outros = Freteiro """
     if pd.isna(valor): return "FRETEIRO"
     doc_limpo = re.sub(r'\D', '', str(valor))
     if len(doc_limpo) == 14: return "PEQUENO FROTISTA"
@@ -103,23 +107,18 @@ def processar_distribuicao_mailing(df, col_doc, col_resp):
     df_proc['PERFIL_CALCULADO'] = df_proc[col_doc].apply(identificar_perfil_pelo_doc)
     return df_proc
 
-# --- NOVO: MOTOR DE FEEDBACK LOOP ---
 def processar_feedback_tarde(df_mestre, df_log, col_id_mestre, col_id_log, col_resp, col_doc):
-    """
-    Remove da base mestre os IDs que aparecem no Log (Já trabalhados na Manhã).
-    Retorna apenas Frotistas Pendentes.
-    """
-    # 1. Identifica IDs trabalhados
-    ids_trabalhados = df_log[col_id_log].unique()
+    ids_trabalhados = df_log[col_id_log].astype(str).unique()
     
-    # 2. Filtra a Base Mestre (Remove quem está no Log)
-    # Garante que os tipos de dados sejam compatíveis (str)
-    df_mestre['TEMP_ID_MATCH'] = df_mestre[col_id_mestre[0]].astype(str)
-    ids_trabalhados_str = [str(x) for x in ids_trabalhados]
+    # Normaliza ID Mestre para string para garantir o match
+    # Pega o primeiro ID da lista de IDs selecionados pelo usuário
+    col_id_uso = col_id_mestre[0]
+    df_mestre['TEMP_ID_MATCH'] = df_mestre[col_id_uso].astype(str)
     
-    df_pendente = df_mestre[~df_mestre['TEMP_ID_MATCH'].isin(ids_trabalhados_str)].copy()
+    # Filtra: Mantém apenas quem NÃO está na lista de ids_trabalhados
+    df_pendente = df_mestre[~df_mestre['TEMP_ID_MATCH'].isin(ids_trabalhados)].copy()
     
-    # 3. Filtra apenas Frotistas (Estratégia da Tarde)
+    # Filtra estratégia (Apenas Frotistas são o foco da Tarde, pois Freteiros já rodaram no almoço)
     df_pendente['ESTRATEGIA'] = df_pendente[col_doc].apply(identificar_perfil_pelo_doc)
     df_tarde = df_pendente[df_pendente['ESTRATEGIA'] == 'PEQUENO FROTISTA']
     
@@ -139,169 +138,12 @@ def gerar_zip_dinamico(df_dados, col_resp, col_segmentacao, modo="DISCADOR"):
             if df_agente.empty: continue
 
             if modo == "FEEDBACK_TARDE":
-                # Apenas 1 arquivo: A Sobra da Tarde
                 data = io.BytesIO()
                 df_agente.to_excel(data, index=False)
-                zip_file.writestr(f"DISCADOR_{nome_arquivo}_3_TARDE_Frotista_Reforco.xlsx", data.getvalue())
-            
+                zip_file.writestr(f"DISCADOR_{nome_arquivo}_REFORCO_TARDE.xlsx", data.getvalue())
             else:
                 col_seg_uso = 'ESTRATEGIA_PERFIL' if modo == "DISCADOR" else col_segmentacao
                 df_frotista = df_agente[df_agente[col_seg_uso] == "PEQUENO FROTISTA"]
                 df_freteiro = df_agente[df_agente[col_seg_uso] == "FRETEIRO"]
                 
-                prefixo = "DISCADOR" if modo == "DISCADOR" else "MAILING"
-                
-                if not df_frotista.empty:
-                    data = io.BytesIO()
-                    df_frotista.to_excel(data, index=False)
-                    zip_file.writestr(f"{nome_arquivo}/{prefixo}_1_MANHA_Frotista_CNPJ.xlsx", data.getvalue())
-                if not df_freteiro.empty:
-                    data = io.BytesIO()
-                    df_freteiro.to_excel(data, index=False)
-                    zip_file.writestr(f"{nome_arquivo}/{prefixo}_2_ALMOCO_Freteiro_CPF.xlsx", data.getvalue())
-
-    zip_buffer.seek(0)
-    return zip_buffer
-
-# ==============================================================================
-# 4. FRONTEND
-# ==============================================================================
-
-st.title("🚛 Michelin Pilot Command Center")
-st.markdown("### Estratégia de Televentas & Logística")
-st.markdown("---")
-
-with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Michelin_Logo.svg/1200px-Michelin_Logo.svg.png", width=150)
-    st.header("1. Carga Matinal (08:00)")
-    uploaded_file = st.file_uploader("Excel Mestre (.xlsx)", type=["xlsx"])
-    
-    st.markdown("---")
-    st.header("2. Carga Vespertina (13:30)")
-    uploaded_log = st.file_uploader("Log de Resultado do Discador (.csv/.xlsx)", type=["xlsx", "csv"])
-
-if uploaded_file:
-    xls = pd.ExcelFile(uploaded_file)
-    all_sheets = xls.sheet_names
-    
-    # AUDITORIA
-    st.subheader("🕵️ Auditoria e Status")
-    aba_d_audit = next((s for s in all_sheets if 'DISCADOR' in s.upper()), None)
-    aba_m_audit = next((s for s in all_sheets if 'MAILING' in s.upper()), None)
-    
-    if aba_d_audit and aba_m_audit:
-        df_audit_d = pd.read_excel(uploaded_file, sheet_name=aba_d_audit)
-        df_audit_m = pd.read_excel(uploaded_file, sheet_name=aba_m_audit)
-        diff = abs(len(df_audit_d) - len(df_audit_m))
-        if diff == 0: st.markdown(f'<div class="audit-box-success">✅ Base Sincronizada: {len(df_audit_d)} registros.</div>', unsafe_allow_html=True)
-        else: st.markdown(f'<div class="audit-box-danger">🚨 Divergência: {diff} registros.</div>', unsafe_allow_html=True)
-
-    # MENU DE ABAS
-    tab1, tab2, tab3 = st.tabs(["🤖 DISCADOR (Manhã)", "👩‍💼 MAILING", "🔄 REPROCESSAMENTO (Tarde)"])
-    
-    # --- ABA 1: DISCADOR (MANHÃ) ---
-    with tab1:
-        st.caption("Gera listas para Manhã (Frotista) e Almoço (Freteiro).")
-        col_sel, _ = st.columns([1,1])
-        aba_d = col_sel.selectbox("Aba Discador:", all_sheets, index=all_sheets.index(aba_d_audit) if aba_d_audit else 0, key='d1')
-        df_d = pd.read_excel(uploaded_file, sheet_name=aba_d)
-        cols_d = df_d.columns.tolist()
-        
-        # Sugestões
-        sug_tel = [c for c in cols_d if any(x in c.upper() for x in ['TEL','CEL','FONE'])]
-        sug_id = [c for c in cols_d if any(x in c.upper() for x in ['ID','NOME','CLIENTE'])]
-        sug_doc = next((c for c in cols_d if 'CNPJ' in c.upper() or 'CPF' in c.upper()), None)
-        sug_resp = next((c for c in cols_d if 'RESPONSAVEL' in c.upper()), cols_d[0])
-        
-        with st.expander("⚙️ Configurar Colunas (Manhã)"):
-            c1, c2 = st.columns(2)
-            sel_resp_d = c1.selectbox("Responsável:", cols_d, index=cols_d.index(sug_resp) if sug_resp in cols_d else 0, key='d_resp')
-            sel_doc_d = c1.selectbox("CPF/CNPJ:", cols_d, index=cols_d.index(sug_doc) if sug_doc in cols_d else 0, key='d_doc')
-            sel_id_d = c2.multiselect("ID Cliente:", cols_d, default=sug_id[:3], key='d_id')
-            sel_tel_d = c2.multiselect("Telefones:", cols_d, default=sug_tel, key='d_tel')
-
-        if st.button("🚀 GERAR PACK MANHÃ (08:00)", key='btn_discador'):
-            with st.spinner("Processando..."):
-                # 1. Balanceamento (opcional, pode ser fixo true)
-                df_trabalho, _, _ = distribuir_leads_orfãos(df_d, sel_resp_d)
-                
-                # 2. Processa
-                df_res_d = processar_discador(df_trabalho, sel_id_d, sel_tel_d, sel_resp_d, sel_doc_d)
-                zip_d = gerar_zip_dinamico(df_res_d, sel_resp_d, None, "DISCADOR") 
-                st.success("Arquivos da Manhã prontos!")
-                st.download_button("📥 BAIXAR PACK MANHÃ (.ZIP)", zip_d, "Discador_Manha_Almoco.zip", "application/zip")
-
-    # --- ABA 2: MAILING ---
-    with tab2:
-        col_sel_m, _ = st.columns([1,1])
-        aba_m = col_sel_m.selectbox("Aba Mailing:", all_sheets, index=all_sheets.index(aba_m_audit) if aba_m_audit else 0, key='m1')
-        df_m = pd.read_excel(uploaded_file, sheet_name=aba_m)
-        cols_m = df_m.columns.tolist()
-        
-        sug_doc_m = next((c for c in cols_m if 'CNPJ' in c.upper() or 'CPF' in c.upper()), None)
-        sug_resp_m = next((c for c in cols_m if 'RESPONSAVEL' in c.upper()), cols_m[0])
-
-        with st.expander("⚙️ Configurar Colunas"):
-            c1, c2 = st.columns(2)
-            sel_resp_m = c1.selectbox("Responsável:", cols_m, index=cols_m.index(sug_resp_m) if sug_resp_m in cols_m else 0, key='m_resp')
-            sel_doc_m = c2.selectbox("CPF/CNPJ:", cols_m, index=cols_m.index(sug_doc_m) if sug_doc_m in cols_m else 0, key='m_doc')
-
-        if st.button("📦 DISTRIBUIR MAILING", key='btn_mailing'):
-            with st.spinner("Distribuindo..."):
-                df_trabalho_m, _, _ = distribuir_leads_orfãos(df_m, sel_resp_m)
-                df_classificado = processar_distribuicao_mailing(df_trabalho_m, sel_doc_m, sel_resp_m)
-                zip_m = gerar_zip_dinamico(df_classificado, sel_resp_m, "PERFIL_CALCULADO", "MAILING")
-                st.success("Pronto!")
-                st.download_button("📥 BAIXAR MAILING", zip_m, "Mailing.zip", "application/zip")
-
-    # --- ABA 3: REPROCESSAMENTO (TARDE) ---
-    with tab3:
-        st.subheader("🔁 Feedback Loop: Geração da Lista da Tarde (14:00)")
-        st.info("Suba o 'Log do Discador' na barra lateral para remover quem já foi contatado na manhã.")
-        
-        if uploaded_log:
-            try:
-                # Tenta ler CSV ou Excel
-                if uploaded_log.name.endswith('.csv'):
-                    df_log = pd.read_csv(uploaded_log, sep=None, engine='python')
-                else:
-                    df_log = pd.read_excel(uploaded_log)
-                
-                st.write(f"Log Carregado: {len(df_log)} registros processados na manhã.")
-                
-                # Configuração de Match
-                c_rep1, c_rep2 = st.columns(2)
-                col_id_log = c_rep1.selectbox("Coluna de ID no LOG (Resultado):", df_log.columns)
-                
-                # Reusa as configurações da aba discador para a base mestre
-                if 'sel_id_d' in locals() and sel_id_d:
-                    st.write(f"Usando ID Mestre: {sel_id_d[0]}")
-                else:
-                    st.warning("Vá na aba 'DISCADOR (Manhã)' e selecione as colunas primeiro.")
-
-                if st.button("🔄 GERAR LISTA REFORÇO TARDE"):
-                     with st.spinner("Cruzando dados e limpando a base..."):
-                        # Balancea primeiro
-                        df_trabalho, _, _ = distribuir_leads_orfãos(df_d, sel_resp_d)
-                        
-                        # Cruza e Filtra (Remove IDs do Log)
-                        df_tarde_limpa, qtd_removida = processar_feedback_tarde(
-                            df_trabalho, df_log, sel_id_d, col_id_log, sel_resp_d, sel_doc_d
-                        )
-                        
-                        # Processa para o Discador (Verticaliza)
-                        df_res_tarde = processar_discador(df_tarde_limpa, sel_id_d, sel_tel_d, sel_resp_d, sel_doc_d)
-                        
-                        # Zip apenas com Frotistas Tarde
-                        zip_tarde = gerar_zip_dinamico(df_res_tarde, sel_resp_d, None, "FEEDBACK_TARDE")
-                        
-                        st.success(f"Lista da Tarde Gerada! {qtd_removida} clientes removidos (já contatados).")
-                        st.download_button("📥 BAIXAR PACK TARDE (.ZIP)", zip_tarde, "Discador_Reforco_Tarde.zip", "application/zip")
-
-            except Exception as e:
-                st.error(f"Erro ao ler o Log: {e}")
-        else:
-            st.warning("⚠️ Aguardando upload do Log na barra lateral (Passo 2).")
-
-else:
-    st.info("Aguardando arquivo Excel Mestre...")
+                prefixo = "DISCADOR
