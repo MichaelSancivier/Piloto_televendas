@@ -8,39 +8,55 @@ import numpy as np
 import random
 
 # ==============================================================================
-# 1. SETUP VISUAL
+# 1. CONFIGURACIÓN VISUAL
 # ==============================================================================
-st.set_page_config(
-    page_title="Michelin Pilot Command Center",
-    page_icon="🚛",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Michelin Pilot Command Center", page_icon="🚛", layout="wide")
 
 st.markdown("""
     <style>
     .main { background-color: #f4f6f9; }
-    h1 { color: #003366; font-family: 'Helvetica', sans-serif; font-weight: bold; }
+    h1 { color: #003366; }
     
-    /* Botão Principal */
+    /* Botón Gigante */
     .stButton>button { 
-        width: 100%; border-radius: 8px; height: 4em; font-weight: bold; font-size: 18px !important;
+        width: 100%; border-radius: 8px; height: 4em; font-weight: bold; font-size: 20px !important;
         background-color: #003366; color: white; border: 2px solid #004080; 
         box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: all 0.3s;
     }
-    .stButton>button:hover { background-color: #FCE500; color: #003366; border-color: #003366; transform: scale(1.02); }
+    .stButton>button:hover { background-color: #FCE500; color: #003366; transform: scale(1.02); }
     
-    /* Alertas */
-    .audit-box-success { padding: 15px; background-color: #d4edda; color: #155724; border-left: 5px solid #28a745; border-radius: 4px; margin-bottom: 10px; }
-    .audit-box-danger { padding: 15px; background-color: #f8d7da; color: #721c24; border-left: 5px solid #dc3545; border-radius: 4px; margin-bottom: 10px; }
+    /* Cajas de Estado */
+    .auto-success { padding: 15px; background-color: #d4edda; color: #155724; border-left: 5px solid #28a745; margin-bottom: 10px; border-radius: 5px;}
+    .auto-error { padding: 15px; background-color: #f8d7da; color: #721c24; border-left: 5px solid #dc3545; margin-bottom: 10px; border-radius: 5px;}
     
-    /* Guia */
-    .info-box { padding: 20px; background-color: #fff; border-radius: 8px; border: 1px solid #ddd; margin-bottom: 20px; }
+    /* Tablas */
+    .preview-box { background-color: #ffffff; padding: 20px; border-radius: 10px; border: 1px solid #ddd; margin-top: 20px; }
     </style>
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. FUNÇÕES AUXILIARES
+# 2. CEREBRO AUTOMÁTICO
+# ==============================================================================
+
+def buscar_coluna_smart(df, keywords_primarias):
+    cols_upper = {c.upper(): c for c in df.columns}
+    for kw in keywords_primarias:
+        if kw in cols_upper: return cols_upper[kw]
+        match = next((real for upper, real in cols_upper.items() if kw in upper), None)
+        if match: return match
+    return None
+
+def validar_coluna_responsavel(df, col_name):
+    if not col_name: return False, "No encontrada"
+    amostra = df[col_name].dropna().unique()[:5]
+    if len(amostra) == 0: return False, "Columna vacía"
+    primeiro = str(amostra[0]).replace('.', '').replace('-', '').strip()
+    if primeiro.isdigit() and len(primeiro) > 6:
+        return False, f"⚠️ La columna '{col_name}' parece contener IDs ({primeiro}...), no Nombres."
+    return True, "OK"
+
+# ==============================================================================
+# 3. LÓGICA DE NEGOCIO
 # ==============================================================================
 
 def normalizar_nome_arquivo(nome):
@@ -61,227 +77,186 @@ def tratar_telefone(val):
     if pd.isna(val): return None, "Vazio"
     nums = re.sub(r'\D', '', str(val))
     if nums.startswith('55') and len(nums) >= 12: nums = nums[2:]
-    
     final = None
     tipo = "Inválido"
     if len(nums) == 11 and int(nums[2]) == 9:
-        tipo = "Celular"
-        final = nums
+        tipo = "Celular"; final = nums
     elif len(nums) == 10 and int(nums[2]) >= 6:
-        tipo = "Celular (Corrigido)"
-        final = nums[:2] + '9' + nums[2:]
+        tipo = "Celular (Corrigido)"; final = nums[:2] + '9' + nums[2:]
     elif len(nums) == 10 and 2 <= int(nums[2]) <= 5:
-        tipo = "Fixo"
-        final = nums
+        tipo = "Fixo"; final = nums
     return (f"+55{final}", tipo) if final else (None, tipo)
 
-# ==============================================================================
-# 3. MOTOR DE DISTRIBUIÇÃO (COM TRAVA DE SEGURANÇA)
-# ==============================================================================
-
-def motor_distribuicao_sincronizado(df_mailing, df_discador, col_id_m, col_id_d, col_resp_m, col_prio_m):
-    mestre = df_mailing.copy()
-    escravo = df_discador.copy()
+def motor_distribuicao(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m):
+    mestre, escravo = df_m.copy(), df_d.copy()
+    mestre['KEY'] = mestre[col_id_m].astype(str).str.strip().str.upper()
+    escravo['KEY'] = escravo[col_id_d].astype(str).str.strip().str.upper()
     
-    # Padroniza chaves
-    mestre['KEY_MATCH'] = mestre[col_id_m].astype(str).str.strip().str.upper()
-    escravo['KEY_MATCH'] = escravo[col_id_d].astype(str).str.strip().str.upper()
+    ignorar = ['CANAL TELEVENDAS', 'TIME', 'EQUIPE', 'TELEVENDAS', 'NULL', 'NAN', '', 'BACKLOG']
+    agentes = [n for n in mestre[col_resp_m].unique() if pd.notna(n) and str(n).strip().upper() not in ignorar]
     
-    # 1. VALIDAÇÃO DE AGENTES (A TRAVA!)
-    termos_ignorar = ['CANAL TELEVENDAS', 'TIME', 'EQUIPE', 'TELEVENDAS', 'NULL', 'NAN', '', 'BACKLOG', 'SEM DONO']
-    todos_nomes = mestre[col_resp_m].unique()
-    agentes_validos = [n for n in todos_nomes if pd.notna(n) and str(n).strip().upper() not in termos_ignorar]
+    if len(agentes) > 25: return None, None, f"🚨 ALERTA: Se detectaron {len(agentes)} agentes. Revisa la columna Responsable."
+
+    mask_orfao = mestre[col_resp_m].isna() | mestre[col_resp_m].astype(str).str.strip().str.upper().isin(ignorar)
     
-    # Se tiver mais de 25 nomes diferentes, é quase certeza que selecionou ID errado
-    if len(agentes_validos) > 25:
-        return None, None, f"🚨 ERRO CRÍTICO: O sistema detectou {len(agentes_validos)} atendentes diferentes. Isso não é normal. \n\nVocê provavelmente selecionou a coluna de **ID/CONTRATO** no campo 'Responsável' em vez da coluna de **NOMES** (Lilian, Susana, etc). Verifique a barra lateral."
+    # Distribución
+    if mask_orfao.sum() > 0:
+        prios = sorted(mestre.loc[mask_orfao, col_prio_m].dropna().unique()) if col_prio_m else [1]
+        for p in prios:
+            mask = mask_orfao & (mestre[col_prio_m] == p) if col_prio_m else mask_orfao
+            idxs = mestre[mask].index.tolist()
+            if idxs:
+                random.shuffle(idxs)
+                eq = agentes.copy(); random.shuffle(eq)
+                mestre.loc[idxs, col_resp_m] = np.resize(eq, len(idxs))
 
-    if not agentes_validos:
-        return None, None, "❌ Erro: Nenhum atendente válido encontrado. Verifique a coluna selecionada."
+    mapa = dict(zip(mestre['KEY'], mestre[col_resp_m]))
+    escravo['RESPONSAVEL_FINAL'] = escravo['KEY'].map(mapa).fillna("SEM_MATCH")
+    return mestre, escravo, f"✅ Procesado: {mask_orfao.sum()} leads distribuidos."
 
-    # 2. DISTRIBUIÇÃO
-    mask_orfao = mestre[col_resp_m].isna() | mestre[col_resp_m].astype(str).str.strip().str.upper().isin(termos_ignorar)
-    total_orfaos = mask_orfao.sum()
-    
-    usar_prio = True if col_prio_m and col_prio_m != "(Sem Prioridade)" else False
-    
-    if usar_prio:
-        try: lista_prios = sorted(mestre.loc[mask_orfao, col_prio_m].dropna().unique())
-        except: lista_prios = mestre.loc[mask_orfao, col_prio_m].dropna().unique()
-    else:
-        lista_prios = [1]
-        
-    for p in lista_prios:
-        if usar_prio: mask_camada = mask_orfao & (mestre[col_prio_m] == p)
-        else: mask_camada = mask_orfao
-            
-        indices = mestre[mask_camada].index.tolist()
-        if indices:
-            random.shuffle(indices)
-            equipe_rodada = agentes_validos.copy()
-            random.shuffle(equipe_rodada)
-            atribuicoes = np.resize(equipe_rodada, len(indices))
-            mestre.loc[indices, col_resp_m] = atribuicoes
+def processar_vertical(df, col_id, cols_tel, col_resp, col_doc):
+    df['PERFIL'] = df[col_doc].apply(identificar_perfil_doc)
+    cols = list(set(col_id + [col_resp, 'PERFIL']))
+    melt = df.melt(id_vars=cols, value_vars=cols_tel, var_name='Orig', value_name='Tel_Raw')
+    melt['Tel_Clean'], _ = zip(*melt['Tel_Raw'].apply(tratar_telefone))
+    return melt.dropna(subset=['Tel_Clean']).drop_duplicates(subset=col_id + ['Tel_Clean'])
 
-    # 3. SINCRONIZAÇÃO
-    mapa_atribuicao = dict(zip(mestre['KEY_MATCH'], mestre[col_resp_m]))
-    escravo['RESPONSAVEL_FINAL'] = escravo['KEY_MATCH'].map(mapa_atribuicao)
-    
-    col_resp_original_d = [c for c in escravo.columns if 'RESP' in c.upper()]
-    if col_resp_original_d:
-        escravo['RESPONSAVEL_FINAL'] = escravo['RESPONSAVEL_FINAL'].fillna(escravo[col_resp_original_d[0]])
-    else:
-        escravo['RESPONSAVEL_FINAL'] = escravo['RESPONSAVEL_FINAL'].fillna("SEM_MATCH")
-
-    return mestre, escravo, f"✅ Sucesso! {total_orfaos} leads distribuídos."
-
-# ==============================================================================
-# 4. PROCESSAMENTO FINAL
-# ==============================================================================
-
-def processar_verticalizacao_discador(df, col_id, cols_tel, col_resp_final, col_doc):
-    df_trab = df.copy()
-    df_trab['ESTRATEGIA_PERFIL'] = df_trab[col_doc].apply(identificar_perfil_doc)
-    
-    cols_fixas = list(set(col_id + [col_resp_final, 'ESTRATEGIA_PERFIL']))
-    df_melt = df_trab.melt(id_vars=cols_fixas, value_vars=cols_tel, var_name='Origem', value_name='Telefone_Bruto')
-    df_melt['Telefone_Tratado'], df_melt['Tipo'] = zip(*df_melt['Telefone_Bruto'].apply(tratar_telefone))
-    
-    return df_melt.dropna(subset=['Telefone_Tratado']).drop_duplicates(subset=col_id + ['Telefone_Tratado'])
-
-def gerar_zip_sincronizado(df_mailing, df_discador, col_resp_m, col_resp_d, col_doc_d, modo="MANHA"):
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zf:
-        
-        # DISCADOR
-        if df_discador is not None:
-            agentes = df_discador[col_resp_d].unique()
-            # Trava Extra na Geração
-            if len(agentes) > 25:
-                return None # Aborta se tiver muitos agentes (erro de ID)
-
-            for agente in agentes:
-                nome_safe = normalizar_nome_arquivo(agente)
-                if nome_safe in ["SEM_DONO", "NAO_ENCONTRADO", "NAN", "SEM_MATCH"]: continue
-                
-                df_agente = df_discador[df_discador[col_resp_d] == agente]
+def gerar_zip(df_m, df_d_vert, col_resp_m, col_resp_d, modo="MANHA"):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED, False) as zf:
+        if df_d_vert is not None:
+            for ag in df_d_vert[col_resp_d].unique():
+                safe = normalizar_nome_arquivo(ag)
+                if safe in ["SEM_DONO", "SEM_MATCH"]: continue
+                df_a = df_d_vert[df_d_vert[col_resp_d] == ag]
                 
                 if modo == "TARDE":
-                    buf = io.BytesIO()
-                    df_agente.to_excel(buf, index=False)
-                    zf.writestr(f"{nome_safe}_DISCADOR_REFORCO_TARDE.xlsx", buf.getvalue())
+                    d = io.BytesIO(); df_a.to_excel(d, index=False)
+                    zf.writestr(f"{safe}_DISCADOR_REFORCO_TARDE.xlsx", d.getvalue())
                 else:
-                    frot = df_agente[df_agente['ESTRATEGIA_PERFIL'] == "PEQUENO FROTISTA"]
-                    fret = df_agente[df_agente['ESTRATEGIA_PERFIL'] == "FRETEIRO"]
-                    
-                    if not frot.empty:
-                        buf = io.BytesIO()
-                        frot.to_excel(buf, index=False)
-                        zf.writestr(f"{nome_safe}_DISCADOR_MANHA_Frotista.xlsx", buf.getvalue())
-                    if not fret.empty:
-                        buf = io.BytesIO()
-                        fret.to_excel(buf, index=False)
-                        zf.writestr(f"{nome_safe}_DISCADOR_ALMOCO_Freteiro.xlsx", buf.getvalue())
-
-        # MAILING
-        if modo == "MANHA" and df_mailing is not None:
-            agentes_m = df_mailing[col_resp_m].unique()
-            for agente in agentes_m:
-                nome_safe = normalizar_nome_arquivo(agente)
-                if nome_safe in ["SEM_DONO", "NAO_ENCONTRADO", "NAN"]: continue
-                df_agente_m = df_mailing[df_mailing[col_resp_m] == agente]
-                if not df_agente_m.empty:
-                    buf = io.BytesIO()
-                    df_agente_m.to_excel(buf, index=False)
-                    zf.writestr(f"{nome_safe}_MAILING_DISTRIBUIDO.xlsx", buf.getvalue())
-
-    zip_buffer.seek(0)
-    return zip_buffer
+                    fr = df_a[df_a['PERFIL'] == "PEQUENO FROTISTA"]
+                    fre = df_a[df_a['PERFIL'] == "FRETEIRO"]
+                    if not fr.empty:
+                        d = io.BytesIO(); fr.to_excel(d, index=False)
+                        zf.writestr(f"{safe}_DISCADOR_MANHA_Frotista.xlsx", d.getvalue())
+                    if not fre.empty:
+                        d = io.BytesIO(); fre.to_excel(d, index=False)
+                        zf.writestr(f"{safe}_DISCADOR_ALMOCO_Freteiro.xlsx", d.getvalue())
+        
+        if modo == "MANHA" and df_m is not None:
+            for ag in df_m[col_resp_m].unique():
+                safe = normalizar_nome_arquivo(ag)
+                if safe in ["SEM_DONO"]: continue
+                df_a = df_m[df_m[col_resp_m] == ag]
+                if not df_a.empty:
+                    d = io.BytesIO(); df_a.to_excel(d, index=False)
+                    zf.writestr(f"{safe}_MAILING_DISTRIBUIDO.xlsx", d.getvalue())
+    buf.seek(0)
+    return buf
 
 # ==============================================================================
-# 5. FRONTEND
+# 4. FRONTEND AUTOMÁTICO
 # ==============================================================================
 
-st.title("🚛 Michelin Pilot V34 (Safe Mode)")
+st.title("🚛 Michelin Pilot V37 (Completo)")
 st.markdown("---")
-
-# GUIA RÁPIDO
-with st.expander("📖 **LEIA ANTES DE COMEÇAR (Evite Erros)**", expanded=False):
-    st.markdown("""
-    1. **Mailing (Mestre):** É aqui que você define quem trabalha.
-       - Coluna **ID**: Deve ser o Contrato ou Código Único.
-       - Coluna **RESPONSÁVEL**: Deve ter nomes (Lilian, Susana). **Não selecione IDs aqui!**
-    2. **Discador (Escravo):** Ele obedece o Mailing.
-       - Coluna **ID**: Deve ser igual à do Mailing para cruzar.
-    """)
 
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Michelin_Logo.svg/1200px-Michelin_Logo.svg.png", width=150)
     modo = st.radio("Modo:", ("🌅 Manhã", "☀️ Tarde"))
     st.markdown("---")
-    uploaded_file = st.file_uploader("Arquivo Excel Principal", type=["xlsx"])
+    file_main = st.file_uploader("Archivo Mestre (.xlsx)", type=["xlsx"])
+    file_log = st.file_uploader("Log Discador (.csv/.xlsx)", type=["csv","xlsx"]) if modo == "☀️ Tarde" else None
 
-if uploaded_file:
-    xls = pd.ExcelFile(uploaded_file)
-    sheets_upper = [s.upper() for s in xls.sheet_names]
+if file_main:
+    xls = pd.ExcelFile(file_main)
+    aba_d = next((s for s in xls.sheet_names if 'DISC' in s.upper()), None)
+    aba_m = next((s for s in xls.sheet_names if 'MAIL' in s.upper()), None)
     
-    aba_d_real = next((s for s in xls.sheet_names if 'DISC' in s.upper()), None)
-    aba_m_real = next((s for s in xls.sheet_names if 'MAIL' in s.upper()), None)
-    
-    if not aba_d_real or not aba_m_real:
-        st.error("Erro: Precisa das abas Discador e Mailing.")
-        st.stop()
+    if not aba_d or not aba_m: st.error("❌ Faltan pestañas 'Discador' o 'Mailing'."); st.stop()
         
-    df_d = pd.read_excel(uploaded_file, sheet_name=aba_d_real)
-    df_m = pd.read_excel(uploaded_file, sheet_name=aba_m_real)
-    
-    # AUDITORIA
-    diff = len(df_d) - len(df_m)
-    cor = "success" if diff == 0 else "danger"
-    st.markdown(f'<div class="audit-box-{cor}">Status: Discador ({len(df_d)}) | Mailing ({len(df_m)})</div>', unsafe_allow_html=True)
+    df_d = pd.read_excel(file_main, sheet_name=aba_d)
+    df_m = pd.read_excel(file_main, sheet_name=aba_m)
 
-    # CONFIGURAÇÃO COM PREVIEW
-    cols_m, cols_d = df_m.columns.tolist(), df_d.columns.tolist()
+    # AUTO-CONFIG
+    st.subheader("🤖 Configuración Automática")
+    col_resp_m = buscar_coluna_smart(df_m, ['RESPONSAVEL', 'RESPONSÁVEL', 'AGENTE'])
+    col_id_m = buscar_coluna_smart(df_m, ['ID_CONTRATO', 'ID_CLIENTE', 'CONTRATO'])
+    col_prio_m = buscar_coluna_smart(df_m, ['PRIORIDADES', 'PRIORIDADE', 'AGING', 'SCORE'])
+    col_doc_m = buscar_coluna_smart(df_m, ['CNPJ_CPF', 'CPF', 'CNPJ', 'DOCUMENTO'])
     
-    with st.expander("⚙️ Seleção de Colunas (CUIDADO AQUI)", expanded=True):
-        c1, c2 = st.columns(2)
+    col_id_d = buscar_coluna_smart(df_d, ['ID_CONTRATO', 'EXTERNAL ID', 'CONTRATO'])
+    col_doc_d = buscar_coluna_smart(df_d, ['CNPJ_CPF', 'CPF', 'CNPJ'])
+    col_tels_d = [c for c in df_d.columns if any(x in c.upper() for x in ['TEL', 'CEL', 'FONE'])]
+
+    val_resp, msg_resp = validar_coluna_responsavel(df_m, col_resp_m)
+    
+    if val_resp:
+        st.markdown(f"""
+        <div class="auto-success">
+            <b>✅ ¡Columnas Detectadas!</b><br>
+            Resp: {col_resp_m} | ID: {col_id_m} | Prio: {col_prio_m}
+        </div>
+        """, unsafe_allow_html=True)
         
-        c1.markdown("#### Mailing (Mestre)")
-        # Tenta adivinhar
-        idx_resp_m = next((i for i, c in enumerate(cols_m) if 'RESP' in c.upper()), 0)
-        sel_resp_m = c1.selectbox("Coluna RESPONSÁVEL (Nomes):", cols_m, index=idx_resp_m)
-        
-        # --- PREVIEW DE SEGURANÇA ---
-        amostra_resp = df_m[sel_resp_m].dropna().unique()[:3]
-        st.caption(f"👀 **O sistema leu:** {', '.join(map(str, amostra_resp))}...")
-        if len(amostra_resp) > 0 and str(amostra_resp[0]).replace('.','').isnumeric():
-            st.error("⚠️ **PARE!** Você selecionou uma coluna de NÚMEROS. Mude para a coluna de NOMES.")
+        if modo == "🌅 Manhã":
+            if st.button("🚀 EJECUTAR PILOTO AUTOMÁTICO"):
+                with st.spinner("Procesando..."):
+                    m, d, msg = motor_distribuicao(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m)
+                    
+                    if m is not None:
+                        d_vert = processar_vertical(d, [col_id_d], col_tels_d, 'RESPONSAVEL_FINAL', col_doc_d)
+                        st.success(msg)
+                        
+                        # --- AQUÍ ESTÁN LAS TABLAS QUE FALTABAN ---
+                        st.markdown('<div class="preview-box">', unsafe_allow_html=True)
+                        st.subheader("📊 Auditoría de Resultados")
+                        t1, t2 = st.tabs(["⚖️ Justicia (Prioridades)", "⏰ Carga Horaria (Perfil)"])
+                        
+                        with t1:
+                            if col_prio_m:
+                                st.write(f"Distribución basada en **{col_prio_m}**:")
+                                res_prio = m.groupby([col_resp_m, col_prio_m]).size().unstack(fill_value=0)
+                                st.dataframe(res_prio, use_container_width=True)
+                            else: st.info("Sin prioridad detectada.")
+                            
+                        with t2:
+                            st.write("Distribución para el Discador (Frotista/Freteiro):")
+                            res_perf = d_vert.groupby(['RESPONSAVEL_FINAL', 'PERFIL'])[col_id_d].nunique().unstack(fill_value=0)
+                            st.dataframe(res_perf, use_container_width=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        # ------------------------------------------
+
+                        zip_f = gerar_zip(m, d_vert, col_resp_m, 'RESPONSAVEL_FINAL', "MANHA")
+                        st.download_button("📥 DESCARGAR PACK", zip_f, "Michelin_Pack.zip", "application/zip", type="primary")
+
+        elif modo == "☀️ Tarde":
+            if file_log:
+                if st.button("🔄 GENERAR REFUERZO"):
+                    m, d, _ = motor_distribuicao(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m)
+                    try:
+                        df_log = pd.read_csv(file_log, sep=None, engine='python') if file_log.name.endswith('.csv') else pd.read_excel(file_log)
+                        col_log_id = df_log.columns[0]
+                        ids_out = df_log[col_log_id].astype(str).unique()
+                        
+                        d['KEY_TEMP'] = d[col_id_d].astype(str)
+                        d_tarde = d[~d['KEY_TEMP'].isin(ids_out)].copy()
+                        d_tarde['PERFIL'] = d_tarde[col_doc_d].apply(identificar_perfil_doc)
+                        d_tarde = d_tarde[d_tarde['PERFIL'] == 'PEQUENO FROTISTA']
+                        
+                        d_vert = processar_vertical(d_tarde, [col_id_d], col_tels_d, 'RESPONSAVEL_FINAL', col_doc_d)
+                        
+                        # --- TABLA TARDE ---
+                        st.write("Resumen Tarde (Pendientes):")
+                        st.dataframe(d_vert.groupby(['RESPONSAVEL_FINAL'])[col_id_d].nunique(), use_container_width=True)
+                        # -------------------
+
+                        zip_t = gerar_zip(None, d_vert, None, 'RESPONSAVEL_FINAL', "TARDE")
+                        st.download_button("📥 DESCARGAR TARDE", zip_t, "Refuerzo_Tarde.zip", "application/zip", type="primary")
+                    except Exception as e: st.error(f"Error Log: {e}")
+            else: st.info("Sube el Log.")
             
-        sel_id_m = c1.selectbox("Coluna ID Único:", cols_m, index=0)
-        sel_prio_m = c1.selectbox("Coluna Prioridade:", ["(Sem Prioridade)"] + cols_m)
-        sel_doc_m = c1.selectbox("Coluna Doc (Para perfil):", cols_m, index=0)
-
-        c2.markdown("#### Discador (Escravo)")
-        sel_id_d = c2.selectbox("Coluna ID Único (Igual Mailing):", cols_d, index=0)
-        sel_doc_d = c2.selectbox("Coluna CPF/CNPJ:", cols_d)
-        sel_tel_d = c2.multiselect("Telefones:", cols_d, default=[c for c in cols_d if 'TEL' in c.upper()])
-
-    if modo == "🌅 Manhã":
-        if st.button("🚀 PROCESSAR"):
-            df_m_final, df_d_final, msg = motor_distribuicao_sincronizado(
-                df_m, df_d, sel_id_m, sel_id_d, sel_resp_m, sel_prio_m
-            )
-            
-            if df_m_final is not None:
-                df_d_vert = processar_verticalizacao_discador(
-                    df_d_final, [sel_id_d], sel_tel_d, 'RESPONSAVEL_FINAL', sel_doc_d
-                )
-                
-                st.success(msg)
-                
-                zip_final = gerar_zip_sincronizado(
-                    df_m_final, df_d_vert, sel_resp_m, 'RESPONSAVEL_FINAL', sel_doc_d, modo="MANHA"
-                )
-                
-                if zip_final:
-                    st.download_button("📥 BAIXAR CORRETAMENTE", zip_final, "Pack_Final.zip", "application/zip", type="primary")
+    else:
+        st.markdown(f'<div class="auto-error">⚠️ {msg_resp}</div>', unsafe_allow_html=True)
+        with st.expander("🛠️ Configuración Manual", expanded=True):
+            col_resp_m = st.selectbox("Columna NOMBRES:", df_m.columns.tolist())
