@@ -25,9 +25,8 @@ st.markdown("""
         background-color: #003366; color: white; border: none;
     }
     .stButton>button:hover { background-color: #004080; color: white; }
-    .stMetric { background-color: white; padding: 15px; border-radius: 8px; border-left: 6px solid #FCE500; box-shadow: 0 2px 5px rgba(0,0,0,0.05);}
-    div[data-testid="stExpander"] { background-color: white; border-radius: 8px; }
-    .preview-box { background-color: #ffffff; padding: 20px; border-radius: 10px; border: 1px solid #e0e0e0; margin-top: 20px; }
+    .preview-box { background-color: #ffffff; padding: 20px; border-radius: 10px; border: 1px solid #e0e0e0; margin-top: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    h3 { color: #2c3e50; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -81,8 +80,12 @@ def distribuir_leads_orfãos(df, col_resp, col_prioridade=None):
     agentes_humanos = [a for a in todos_resp if pd.notna(a) and str(a).strip().upper() not in termos_ignorar]
     
     if not agentes_humanos: return df_proc, "Sem equipe humana.", 0
+    
+    # Identifica Backlog (Sem dono)
     mask_orfao = df_proc[col_resp].isna() | df_proc[col_resp].astype(str).str.strip().str.upper().isin(termos_ignorar)
     
+    # ORDENAÇÃO POR PRIORIDADE (Se existir)
+    # Isso garante que a distribuição comece pelos VIPs
     if col_prioridade and col_prioridade in df_proc.columns:
         indices_orfaos = df_proc[mask_orfao].sort_values(by=col_prioridade, ascending=True).index
     else:
@@ -93,13 +96,12 @@ def distribuir_leads_orfãos(df, col_resp, col_prioridade=None):
 
     atribuicoes = np.resize(agentes_humanos, qtd_orfaos)
     df_proc.loc[indices_orfaos, col_resp] = atribuicoes
-    return df_proc, f"Sucesso! {qtd_orfaos} leads distribuídos.", qtd_orfaos
+    return df_proc, f"Sucesso! {qtd_orfaos} leads do Backlog distribuídos.", qtd_orfaos
 
 def processar_discador(df, col_id, cols_tel, col_resp, col_doc, col_prio=None):
     df_trab = df.copy()
     df_trab['ESTRATEGIA_PERFIL'] = df_trab[col_doc].apply(identificar_perfil_pelo_doc)
     
-    # IMPORTANTE: Mantém a coluna de prioridade se ela existir
     cols_para_manter = col_id + [col_resp, 'ESTRATEGIA_PERFIL']
     if col_prio and col_prio in df.columns:
         cols_para_manter.append(col_prio)
@@ -142,13 +144,10 @@ def gerar_zip_dinamico(df_dados, col_resp, col_segmentacao, modo="DISCADOR"):
             else: df_agente = df_dados[df_dados[col_resp] == agente]
             if df_agente.empty: continue
 
-            # ZIP PLANO: NOME_AGENTE NO ARQUIVO, NÃO NA PASTA
             if modo == "FEEDBACK_TARDE":
                 data = io.BytesIO()
                 df_agente.to_excel(data, index=False)
-                # Ex: LILIAN_RODRIGUES_DISCADOR_REFORCO_TARDE.xlsx
                 zip_file.writestr(f"{nome_agente}_DISCADOR_REFORCO_TARDE.xlsx", data.getvalue())
-            
             else:
                 df_frotista = df_agente[df_agente[col_seg_uso] == "PEQUENO FROTISTA"]
                 df_freteiro = df_agente[df_agente[col_seg_uso] == "FRETEIRO"]
@@ -157,15 +156,12 @@ def gerar_zip_dinamico(df_dados, col_resp, col_segmentacao, modo="DISCADOR"):
                 if not df_frotista.empty:
                     data = io.BytesIO()
                     df_frotista.to_excel(data, index=False)
-                    # Ex: LILIAN_RODRIGUES_MANHA_Frotista.xlsx
                     zip_file.writestr(f"{nome_agente}_{prefixo}_MANHA_Frotista_CNPJ.xlsx", data.getvalue())
                 
                 if not df_freteiro.empty:
                     data = io.BytesIO()
                     df_freteiro.to_excel(data, index=False)
-                    # Ex: LILIAN_RODRIGUES_ALMOCO_Freteiro.xlsx
                     zip_file.writestr(f"{nome_agente}_{prefixo}_ALMOCO_Freteiro_CPF.xlsx", data.getvalue())
-
     zip_buffer.seek(0)
     return zip_buffer
 
@@ -238,19 +234,32 @@ if uploaded_file:
                     df_trabalho = df_d.copy()
                     if aplicar_bal_d: df_trabalho, msg, _ = distribuir_leads_orfãos(df_trabalho, sel_resp_d, sel_prio_d)
                     
-                    # Passa a coluna de prioridade para ser mantida no arquivo final
                     df_res_d = processar_discador(df_trabalho, sel_id_d, sel_tel_d, sel_resp_d, sel_doc_d, sel_prio_d)
                     
                     st.markdown('<div class="preview-box">', unsafe_allow_html=True)
-                    st.subheader("🔎 Conferência Final")
-                    try:
-                        resumo = df_res_d.groupby([sel_resp_d, 'ESTRATEGIA_PERFIL']).size().unstack(fill_value=0)
-                        st.write("📊 Carga por Atendente:")
-                        st.dataframe(resumo, use_container_width=True)
-                    except: pass
+                    st.subheader("🔎 Conferência Final (Raio-X)")
                     
-                    st.write("👀 Amostra do Arquivo (Verifique a Coluna de Prioridade):")
-                    st.dataframe(df_res_d.head(20), use_container_width=True)
+                    # ABAS DE CONFERÊNCIA
+                    conf1, conf2 = st.tabs(["📊 Distribuição (Manhã/Almoço)", "💎 Qualidade (Prioridades)"])
+                    
+                    with conf1:
+                        st.caption("Confirme se todos têm Frotistas (Manhã) e Freteiros (Almoço).")
+                        try:
+                            resumo = df_res_d.groupby([sel_resp_d, 'ESTRATEGIA_PERFIL']).size().unstack(fill_value=0)
+                            st.dataframe(resumo, use_container_width=True)
+                        except: st.write("Não foi possível gerar a tabela.")
+
+                    with conf2:
+                        if sel_prio_d:
+                            st.caption(f"Distribuição baseada na coluna: {sel_prio_d}")
+                            try:
+                                # Agrupa por Responsável e Prioridade para ver a justiça
+                                resumo_prio = df_res_d.groupby([sel_resp_d, sel_prio_d]).size().unstack(fill_value=0)
+                                st.dataframe(resumo_prio, use_container_width=True)
+                            except: st.write("Erro ao agrupar prioridades.")
+                        else:
+                            st.info("Nenhuma coluna de prioridade foi selecionada para análise.")
+                    
                     st.markdown('</div>', unsafe_allow_html=True)
 
                     zip_d = gerar_zip_dinamico(df_res_d, sel_resp_d, None, "DISCADOR") 
@@ -284,8 +293,22 @@ if uploaded_file:
                     
                     st.markdown('<div class="preview-box">', unsafe_allow_html=True)
                     st.subheader("🔎 Conferência Visual")
-                    resumo_m = df_classificado.groupby([sel_resp_m, 'PERFIL_CALCULADO']).size().unstack(fill_value=0)
-                    st.dataframe(resumo_m, use_container_width=True)
+                    
+                    # ABAS DE CONFERÊNCIA TAMBÉM NO MAILING
+                    conf1_m, conf2_m = st.tabs(["📊 Distribuição", "💎 Qualidade (Prioridades)"])
+                    
+                    with conf1_m:
+                         resumo_m = df_classificado.groupby([sel_resp_m, 'PERFIL_CALCULADO']).size().unstack(fill_value=0)
+                         st.dataframe(resumo_m, use_container_width=True)
+                    
+                    with conf2_m:
+                        if sel_prio_m:
+                            try:
+                                resumo_prio_m = df_classificado.groupby([sel_resp_m, sel_prio_m]).size().unstack(fill_value=0)
+                                st.dataframe(resumo_prio_m, use_container_width=True)
+                            except: st.write("Erro na tabela.")
+                        else: st.info("Sem prioridade selecionada.")
+
                     st.markdown('</div>', unsafe_allow_html=True)
 
                     zip_m = gerar_zip_dinamico(df_classificado, sel_resp_m, "PERFIL_CALCULADO", "MAILING")
