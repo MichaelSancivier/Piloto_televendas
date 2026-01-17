@@ -23,14 +23,29 @@ st.markdown("""
     }
     .stButton>button:hover { background-color: #FCE500; color: #003366; transform: scale(1.02); }
     .auto-success { padding: 15px; background-color: #d4edda; color: #155724; border-left: 5px solid #28a745; margin-bottom: 10px; border-radius: 5px;}
+    .auto-warning { padding: 15px; background-color: #fff3cd; color: #856404; border-left: 5px solid #ffeeba; margin-bottom: 10px; border-radius: 5px;}
     .auto-error { padding: 15px; background-color: #f8d7da; color: #721c24; border-left: 5px solid #dc3545; margin-bottom: 10px; border-radius: 5px;}
     div[data-testid="stDataFrame"] { width: 100%; }
     </style>
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. AUTO-CONFIGURAÇÃO
+# 2. FERRAMENTAS DE LIMPEZA (SUPER AGRESSIVAS)
 # ==============================================================================
+
+def limpar_id_agressivo(valor):
+    """
+    Remove .0, espaços, pontos e traços para garantir que 
+    '1051.0' seja igual a '1051'
+    """
+    if pd.isna(valor): return "SEM_ID"
+    # Converte para string
+    s = str(valor).strip().upper()
+    # Remove decimais flutuantes comuns em Excel (ex: 12345.0 -> 12345)
+    if s.endswith('.0'): s = s[:-2]
+    # Remove tudo que não for alfanumérico (mantém letras e números)
+    s = re.sub(r'[^A-Z0-9]', '', s)
+    return s
 
 def buscar_coluna_smart(df, keywords_primarias):
     cols_upper = {c.upper(): c for c in df.columns}
@@ -70,11 +85,15 @@ def identificar_perfil_doc(valor):
 def tratar_telefone(val):
     if pd.isna(val): return None, "Vazio"
     nums = re.sub(r'\D', '', str(val))
+    # Tratamento agressivo para inputs como "+55"
+    if nums == "55": return None, "Vazio"
     if nums.startswith('55') and len(nums) >= 12: nums = nums[2:]
+    
     final = None; tipo = "Inválido"
     if len(nums) == 11 and int(nums[2]) == 9: tipo = "Celular"; final = nums
     elif len(nums) == 10 and int(nums[2]) >= 6: tipo = "Celular (Corrigido)"; final = nums[:2] + '9' + nums[2:]
     elif len(nums) == 10 and 2 <= int(nums[2]) <= 5: tipo = "Fixo"; final = nums
+    
     return (f"+55{final}", tipo) if final else (None, tipo)
 
 def calcular_peso_prioridade(val):
@@ -89,9 +108,15 @@ def motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, co
     mestre = df_m.copy()
     escravo = df_d.copy()
     
-    # Standardize Keys
-    mestre['KEY'] = mestre[col_id_m].astype(str).str.strip().str.upper()
-    escravo['KEY'] = escravo[col_id_d].astype(str).str.strip().str.upper()
+    # --- SUPER LIMPEZA DE CHAVES ---
+    mestre['KEY'] = mestre[col_id_m].apply(limpar_id_agressivo)
+    escravo['KEY'] = escravo[col_id_d].apply(limpar_id_agressivo)
+    
+    # Validar Match Rate
+    ids_mestre = set(mestre['KEY'].unique())
+    ids_escravo = set(escravo['KEY'].unique())
+    matches = ids_mestre.intersection(ids_escravo)
+    match_rate = len(matches) / len(ids_mestre) * 100 if len(ids_mestre) > 0 else 0
     
     # 1. CALCULATE PROFILE IN MAILING
     mestre['PERFIL_FINAL'] = mestre[col_doc_m].apply(identificar_perfil_doc)
@@ -99,7 +124,7 @@ def motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, co
     ignorar = ['CANAL TELEVENDAS', 'TIME', 'EQUIPE', 'TELEVENDAS', 'NULL', 'NAN', '', 'BACKLOG', 'SEM DONO']
     agentes = [n for n in mestre[col_resp_m].unique() if pd.notna(n) and str(n).strip().upper() not in ignorar]
     
-    if len(agentes) > 25: return None, None, f"🚨 ALERTA: {len(agentes)} agentes. Error columna ID."
+    if len(agentes) > 25: return None, None, f"🚨 ALERTA: {len(agentes)} agentes. Error columna ID.", 0
     
     snapshot_inicial = mestre[col_resp_m].value_counts().to_dict()
 
@@ -136,10 +161,10 @@ def motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, co
     df_audit = pd.DataFrame([snapshot_inicial, snapshot_final], index=['Inicio', 'Final']).T.fillna(0)
     df_audit['Cambio'] = df_audit['Final'] - df_audit['Inicio']
     
-    return mestre, escravo, df_audit
+    return mestre, escravo, df_audit, match_rate
 
 # ==============================================================================
-# 4. GENERACIÓN DE ARCHIVOS (GARANTIZADO 8 OUTPUTS)
+# 4. GENERACIÓN DE ARCHIVOS
 # ==============================================================================
 
 def processar_vertical(df, col_id, cols_tel, col_resp_col, col_perfil_col):
@@ -152,49 +177,37 @@ def gerar_zip_completo(df_m, df_d_vert, col_resp_m, col_resp_d_final, col_perfil
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED, False) as zf:
         
-        # --- DISCADOR (4 FILES: 2 AGENTS x 2 PROFILES) ---
+        # --- DISCADOR ---
         if df_d_vert is not None:
-            # Get all unique agents (even those with empty profiles)
             all_agents = df_d_vert[col_resp_d_final].unique()
-            
             for ag in all_agents:
                 safe = normalizar_nome_arquivo(ag)
                 if safe in ["SEM_DONO", "SEM_MATCH"]: continue
-                
                 df_a = df_d_vert[df_d_vert[col_resp_d_final] == ag]
                 
                 if modo == "TARDE":
                     d = io.BytesIO(); df_a.to_excel(d, index=False)
                     zf.writestr(f"{safe}_DISCADOR_REFORCO_TARDE.xlsx", d.getvalue())
                 else:
-                    # FIX: Force file generation even if empty
                     fr = df_a[df_a[col_perfil_d_final] == "PEQUENO FROTISTA"]
                     fre = df_a[df_a[col_perfil_d_final] == "FRETEIRO"]
-                    
-                    # Always Write
                     d1 = io.BytesIO(); fr.to_excel(d1, index=False)
                     zf.writestr(f"{safe}_DISCADOR_MANHA_Frotista.xlsx", d1.getvalue())
-                    
                     d2 = io.BytesIO(); fre.to_excel(d2, index=False)
                     zf.writestr(f"{safe}_DISCADOR_ALMOCO_Freteiro.xlsx", d2.getvalue())
 
-        # --- MAILING (4 FILES: 2 AGENTS x 2 PROFILES) ---
+        # --- MAILING ---
         if modo == "MANHA" and df_m is not None:
             all_agents_m = df_m[col_resp_m].unique()
-            
             for ag in all_agents_m:
                 safe = normalizar_nome_arquivo(ag)
                 if safe in ["SEM_DONO"]: continue
-                
                 df_a = df_m[df_m[col_resp_m] == ag]
                 
                 fr = df_a[df_a['PERFIL_FINAL'] == "PEQUENO FROTISTA"]
                 fre = df_a[df_a['PERFIL_FINAL'] == "FRETEIRO"]
-                
-                # Always Write
                 d1 = io.BytesIO(); fr.to_excel(d1, index=False)
                 zf.writestr(f"{safe}_MAILING_MANHA_Frotista.xlsx", d1.getvalue())
-                
                 d2 = io.BytesIO(); fre.to_excel(d2, index=False)
                 zf.writestr(f"{safe}_MAILING_ALMOCO_Freteiro.xlsx", d2.getvalue())
     
@@ -205,7 +218,7 @@ def gerar_zip_completo(df_m, df_d_vert, col_resp_m, col_resp_d_final, col_perfil
 # 5. FRONTEND
 # ==============================================================================
 
-st.title("🚛 Michelin Pilot V43 (Force 8 Files)")
+st.title("🚛 Michelin Pilot V44 (Fix ID Match)")
 st.markdown("---")
 
 with st.sidebar:
@@ -234,43 +247,47 @@ if file_main:
     val_resp, msg_resp = validar_coluna_responsavel(df_m, col_resp_m)
     
     if val_resp:
-        st.markdown(f"""<div class="auto-success">✅ <b>Detectado:</b> Resp: {col_resp_m} | ID: {col_id_m}</div>""", unsafe_allow_html=True)
+        st.markdown(f"""<div class="auto-success">✅ <b>Detectado:</b> Resp: {col_resp_m} | ID Mailing: {col_id_m} | ID Discador: {col_id_d}</div>""", unsafe_allow_html=True)
         
         if modo == "🌅 Manhã":
             if st.button("🚀 EJECUTAR"):
-                m, d, audit = motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m, col_doc_m)
+                m, d, audit, rate = motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m, col_doc_m)
                 
                 if m is not None:
+                    # ALERTA DE MATCH RATE
+                    if rate < 95:
+                        st.markdown(f"""<div class="auto-error">⚠️ <b>ATENÇÃO: Taxa de Match Baixa ({rate:.1f}%)</b><br>
+                        Muitos clientes do Mailing não foram encontrados no Discador. Verifique se os IDs estão escritos da mesma forma (números vs texto).</div>""", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"""<div class="auto-success">💎 <b>Match Rate Perfeito: {rate:.1f}%</b></div>""", unsafe_allow_html=True)
+                    
                     st.subheader("📊 Auditoría")
                     c1, c2 = st.columns(2)
                     c1.write("**Cartera:**"); c1.dataframe(audit.style.format("{:.0f}"), use_container_width=True)
                     
-                    c2.write("**Distribución Perfil (Total):**")
                     res_perfil = pd.crosstab(m[col_resp_m], m['PERFIL_FINAL'], margins=True, margins_name="TOTAL")
-                    c2.dataframe(res_perfil, use_container_width=True)
+                    c2.write("**Distribución Perfil (Total):**"); c2.dataframe(res_perfil, use_container_width=True)
                     
                     if col_prio_m:
-                        st.write("**Prioridades:**")
                         res_prio = pd.crosstab(m[col_resp_m], m[col_prio_m], margins=True, margins_name="TOTAL")
-                        st.dataframe(res_prio, use_container_width=True)
+                        st.write("**Prioridades:**"); st.dataframe(res_prio, use_container_width=True)
                     
                     d_vert = processar_vertical(d, [col_id_d], col_tels_d, 'RESPONSAVEL_FINAL', 'PERFIL_FINAL')
                     
-                    # Gera 8 arquivos (Mailing Frot/Fret + Discador Frot/Fret para cada Agente)
                     zip_f = gerar_zip_completo(m, d_vert, col_resp_m, 'RESPONSAVEL_FINAL', 'PERFIL_FINAL', "MANHA")
                     st.success("✅ ¡8 Archivos Generados!")
-                    st.download_button("📥 DESCARGAR KIT", zip_f, "Michelin_Kit_V43.zip", "application/zip", type="primary")
+                    st.download_button("📥 DESCARGAR KIT", zip_f, "Michelin_Kit_V44.zip", "application/zip", type="primary")
 
         elif modo == "☀️ Tarde":
             if file_log:
                 if st.button("🔄 REFUERZO"):
-                    m, d, _ = motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m, col_doc_m)
+                    m, d, _, _ = motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m, col_doc_m)
                     try:
                         df_log = pd.read_csv(file_log, sep=None, engine='python') if file_log.name.endswith('.csv') else pd.read_excel(file_log)
                         col_log_id = df_log.columns[0]
-                        ids_out = df_log[col_log_id].astype(str).unique()
+                        ids_out = df_log[col_log_id].apply(limpar_id_agressivo).unique()
                         
-                        d['KEY_TEMP'] = d[col_id_d].astype(str)
+                        d['KEY_TEMP'] = d[col_id_d].apply(limpar_id_agressivo)
                         d_tarde = d[~d['KEY_TEMP'].isin(ids_out)].copy()
                         d_tarde = d_tarde[d_tarde['PERFIL_FINAL'] == 'PEQUENO FROTISTA']
                         
