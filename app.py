@@ -25,7 +25,6 @@ st.markdown("""
     .auto-success { padding: 15px; background-color: #d4edda; color: #155724; border-left: 5px solid #28a745; margin-bottom: 10px; border-radius: 5px;}
     .auto-error { padding: 15px; background-color: #f8d7da; color: #721c24; border-left: 5px solid #dc3545; margin-bottom: 10px; border-radius: 5px;}
     div[data-testid="stDataFrame"] { width: 100%; }
-    h3 { color: #003366; border-bottom: 2px solid #FCE500; padding-bottom: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -51,7 +50,7 @@ def validar_coluna_responsavel(df, col_name):
     return True, "OK"
 
 # ==============================================================================
-# 3. LÓGICA DE NEGOCIO (QUIRÚRGICA)
+# 3. LÓGICA DE NEGOCIO
 # ==============================================================================
 
 def normalizar_nome_arquivo(nome):
@@ -66,7 +65,6 @@ def identificar_perfil_doc(valor):
     val_str = str(valor)
     if val_str.endswith('.0'): val_str = val_str[:-2]
     doc = re.sub(r'\D', '', val_str)
-    # Regra: 14 dígitos = FROTISTA, resto = FRETEIRO
     return "PEQUENO FROTISTA" if len(doc) == 14 else "FRETEIRO"
 
 def tratar_telefone(val):
@@ -87,21 +85,26 @@ def calcular_peso_prioridade(val):
     if nums: return int(nums[0])
     return 50
 
-def motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m):
+def motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m, col_doc_m):
     mestre = df_m.copy()
     escravo = df_d.copy()
     
+    # Standardize Keys
     mestre['KEY'] = mestre[col_id_m].astype(str).str.strip().str.upper()
     escravo['KEY'] = escravo[col_id_d].astype(str).str.strip().str.upper()
+    
+    # 1. CALCULATE PROFILE IN MAILING (THE MASTER SOURCE)
+    # This ensures consistency. We calculate here and pass it down.
+    mestre['PERFIL_FINAL'] = mestre[col_doc_m].apply(identificar_perfil_doc)
     
     ignorar = ['CANAL TELEVENDAS', 'TIME', 'EQUIPE', 'TELEVENDAS', 'NULL', 'NAN', '', 'BACKLOG', 'SEM DONO']
     agentes = [n for n in mestre[col_resp_m].unique() if pd.notna(n) and str(n).strip().upper() not in ignorar]
     
-    if len(agentes) > 25: return None, None, f"🚨 ALERTA: {len(agentes)} agentes detectados. Posible error de columna ID."
+    if len(agentes) > 25: return None, None, f"🚨 ALERTA: {len(agentes)} agentes. Error columna ID."
     
     snapshot_inicial = mestre[col_resp_m].value_counts().to_dict()
 
-    # 1. Asignar Huérfanos
+    # --- ASIGNACIÓN ---
     mestre['PRIO_SCORE'] = mestre[col_prio_m].apply(calcular_peso_prioridade) if col_prio_m else 1
     mask_orfao = mestre[col_resp_m].isna() | mestre[col_resp_m].astype(str).str.strip().str.upper().isin(ignorar)
     orfaos_idxs = mestre[mask_orfao].index.tolist()
@@ -112,7 +115,7 @@ def motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, co
         agente_menor_carga = min(agentes, key=lambda x: cargas.get(x, 0))
         mestre.at[idx, col_resp_m] = agente_menor_carga
 
-    # 2. Nivelación
+    # --- NIVELACIÓN ---
     for _ in range(len(agentes) * 100): 
         cargas = mestre[col_resp_m].value_counts()
         agente_max = max(agentes, key=lambda x: cargas.get(x, 0))
@@ -122,9 +125,16 @@ def motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, co
         if not candidatos.empty:
             mestre.at[candidatos.index[0], col_resp_m] = agente_min
 
-    # 3. Sync
-    mapa = dict(zip(mestre['KEY'], mestre[col_resp_m]))
-    escravo['RESPONSAVEL_FINAL'] = escravo['KEY'].map(mapa).fillna("SEM_MATCH")
+    # --- SYNC (NOMBRE + PERFIL) ---
+    # Sync Responsible
+    mapa_resp = dict(zip(mestre['KEY'], mestre[col_resp_m]))
+    escravo['RESPONSAVEL_FINAL'] = escravo['KEY'].map(mapa_resp).fillna("SEM_MATCH")
+    
+    # Sync Profile (Here is the Fix!)
+    mapa_perfil = dict(zip(mestre['KEY'], mestre['PERFIL_FINAL']))
+    escravo['PERFIL_FINAL'] = escravo['KEY'].map(mapa_perfil)
+    # If missing match, default to Freteiro (safer)
+    escravo['PERFIL_FINAL'] = escravo['PERFIL_FINAL'].fillna("FRETEIRO")
     
     snapshot_final = mestre[col_resp_m].value_counts().to_dict()
     df_audit = pd.DataFrame([snapshot_inicial, snapshot_final], index=['Inicio', 'Final']).T.fillna(0)
@@ -133,35 +143,35 @@ def motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, co
     return mestre, escravo, df_audit
 
 # ==============================================================================
-# 4. GENERACIÓN DE ARCHIVOS (4 OUTPUTS)
+# 4. GENERACIÓN DE ARCHIVOS
 # ==============================================================================
 
-def processar_vertical(df, col_id, cols_tel, col_resp, col_doc):
-    # Calcula Perfil no Discador para verticalizar corretamente
-    df['PERFIL'] = df[col_doc].apply(identificar_perfil_doc)
-    cols = list(set(col_id + [col_resp, 'PERFIL']))
+def processar_vertical(df, col_id, cols_tel, col_resp_col, col_perfil_col):
+    # We use the synced columns 'RESPONSAVEL_FINAL' and 'PERFIL_FINAL'
+    cols = list(set(col_id + [col_resp_col, col_perfil_col]))
     melt = df.melt(id_vars=cols, value_vars=cols_tel, var_name='Orig', value_name='Tel_Raw')
     melt['Tel_Clean'], _ = zip(*melt['Tel_Raw'].apply(tratar_telefone))
-    # Remove inválidos para não gerar lixo no discador
     return melt.dropna(subset=['Tel_Clean']).drop_duplicates(subset=col_id + ['Tel_Clean'])
 
-def gerar_zip_completo(df_m, df_d_vert, col_resp_m, col_resp_d, col_doc_m, modo="MANHA"):
+def gerar_zip_completo(df_m, df_d_vert, col_resp_m, col_resp_d_final, col_perfil_d_final, modo="MANHA"):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED, False) as zf:
         
-        # --- DISCADOR (Manhã/Almoço) ---
+        # --- DISCADOR ---
         if df_d_vert is not None:
-            for ag in df_d_vert[col_resp_d].unique():
+            for ag in df_d_vert[col_resp_d_final].unique():
                 safe = normalizar_nome_arquivo(ag)
                 if safe in ["SEM_DONO", "SEM_MATCH"]: continue
-                df_a = df_d_vert[df_d_vert[col_resp_d] == ag]
+                df_a = df_d_vert[df_d_vert[col_resp_d_final] == ag]
                 
                 if modo == "TARDE":
                     d = io.BytesIO(); df_a.to_excel(d, index=False)
                     zf.writestr(f"{safe}_DISCADOR_REFORCO_TARDE.xlsx", d.getvalue())
                 else:
-                    fr = df_a[df_a['PERFIL'] == "PEQUENO FROTISTA"]
-                    fre = df_a[df_a['PERFIL'] == "FRETEIRO"]
+                    # Using the Synced Profile Column
+                    fr = df_a[df_a[col_perfil_d_final] == "PEQUENO FROTISTA"]
+                    fre = df_a[df_a[col_perfil_d_final] == "FRETEIRO"]
+                    
                     if not fr.empty:
                         d = io.BytesIO(); fr.to_excel(d, index=False)
                         zf.writestr(f"{safe}_DISCADOR_MANHA_Frotista.xlsx", d.getvalue())
@@ -169,24 +179,23 @@ def gerar_zip_completo(df_m, df_d_vert, col_resp_m, col_resp_d, col_doc_m, modo=
                         d = io.BytesIO(); fre.to_excel(d, index=False)
                         zf.writestr(f"{safe}_DISCADOR_ALMOCO_Freteiro.xlsx", d.getvalue())
 
-        # --- MAILING (Manhã/Almoço) ---
+        # --- MAILING ---
         if modo == "MANHA" and df_m is not None:
-            df_m['PERFIL_TEMP'] = df_m[col_doc_m].apply(identificar_perfil_doc)
+            # Mailing already has PERFIL_FINAL calculated in motor
             for ag in df_m[col_resp_m].unique():
                 safe = normalizar_nome_arquivo(ag)
                 if safe in ["SEM_DONO"]: continue
                 df_a = df_m[df_m[col_resp_m] == ag]
                 
-                # Split também no Mailing
-                fr = df_a[df_a['PERFIL_TEMP'] == "PEQUENO FROTISTA"]
-                fre = df_a[df_a['PERFIL_TEMP'] == "FRETEIRO"]
+                fr = df_a[df_a['PERFIL_FINAL'] == "PEQUENO FROTISTA"]
+                fre = df_a[df_a['PERFIL_FINAL'] == "FRETEIRO"]
+                
                 if not fr.empty:
                     d = io.BytesIO(); fr.to_excel(d, index=False)
                     zf.writestr(f"{safe}_MAILING_MANHA_Frotista.xlsx", d.getvalue())
                 if not fre.empty:
                     d = io.BytesIO(); fre.to_excel(d, index=False)
                     zf.writestr(f"{safe}_MAILING_ALMOCO_Freteiro.xlsx", d.getvalue())
-    
     buf.seek(0)
     return buf
 
@@ -194,7 +203,7 @@ def gerar_zip_completo(df_m, df_d_vert, col_resp_m, col_resp_d, col_doc_m, modo=
 # 5. FRONTEND
 # ==============================================================================
 
-st.title("🚛 Michelin Pilot V41 (Audit Full)")
+st.title("🚛 Michelin Pilot V42 (Sync Fix)")
 st.markdown("---")
 
 with st.sidebar:
@@ -212,68 +221,64 @@ if file_main:
     df_d = pd.read_excel(file_main, sheet_name=aba_d)
     df_m = pd.read_excel(file_main, sheet_name=aba_m)
 
-    st.subheader("🤖 Configuración Automática")
     col_resp_m = buscar_coluna_smart(df_m, ['RESPONSAVEL', 'RESPONSÁVEL', 'AGENTE'])
     col_id_m = buscar_coluna_smart(df_m, ['ID_CONTRATO', 'ID_CLIENTE', 'CONTRATO'])
     col_prio_m = buscar_coluna_smart(df_m, ['PRIORIDADES', 'PRIORIDADE', 'AGING', 'SCORE'])
     col_doc_m = buscar_coluna_smart(df_m, ['CNPJ_CPF', 'CPF', 'CNPJ', 'DOCUMENTO'])
     
     col_id_d = buscar_coluna_smart(df_d, ['ID_CONTRATO', 'EXTERNAL ID', 'CONTRATO'])
-    col_doc_d = buscar_coluna_smart(df_d, ['CNPJ_CPF', 'CPF', 'CNPJ'])
+    # Documento Discador es menos relevante ahora, usamos Mailing
     col_tels_d = [c for c in df_d.columns if any(x in c.upper() for x in ['TEL', 'CEL', 'FONE'])]
 
     val_resp, msg_resp = validar_coluna_responsavel(df_m, col_resp_m)
     
     if val_resp:
-        st.markdown(f"""<div class="auto-success">✅ <b>Detectado:</b> Resp: {col_resp_m} | ID: {col_id_m} | Doc: {col_doc_m}</div>""", unsafe_allow_html=True)
+        st.markdown(f"""<div class="auto-success">✅ <b>Detectado:</b> Resp: {col_resp_m} | ID: {col_id_m}</div>""", unsafe_allow_html=True)
         
         if modo == "🌅 Manhã":
             if st.button("🚀 EJECUTAR"):
-                m, d, audit = motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m)
+                # PASAMOS col_doc_m AL MOTOR PARA CALCULAR PERFIL MASTER
+                m, d, audit = motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m, col_doc_m)
                 
                 if m is not None:
-                    # METRICAS
-                    total_base = len(m); qtd_agentes = len(audit); meta = total_base // qtd_agentes
-                    
-                    st.subheader("📊 Auditoría de Balanceo")
-                    
-                    # LINHA 1: AUDIT (CARTERA) + PERFIL (NOVA)
+                    st.subheader("📊 Auditoría")
                     c1, c2 = st.columns(2)
-                    c1.write("**1. Movimientos en Cartera:**")
-                    c1.dataframe(audit.style.format("{:.0f}"), use_container_width=True)
+                    c1.write("**Cartera:**"); c1.dataframe(audit.style.format("{:.0f}"), use_container_width=True)
                     
-                    # A NOVA TABELA AQUI:
-                    c2.write("**2. Distribución Perfil (Mañana/Tarde):**")
-                    m['PERFIL_VISUAL'] = m[col_doc_m].apply(identificar_perfil_doc)
-                    res_perfil = pd.crosstab(m[col_resp_m], m['PERFIL_VISUAL'], margins=True, margins_name="TOTAL")
+                    c2.write("**Distribución Perfil (A = B):**")
+                    # Usamos PERFIL_FINAL que viene del Motor
+                    res_perfil = pd.crosstab(m[col_resp_m], m['PERFIL_FINAL'], margins=True, margins_name="TOTAL")
                     c2.dataframe(res_perfil, use_container_width=True)
                     
-                    # LINHA 2: PRIORIDADES (GRANDE)
-                    st.write("**3. Detalle por Prioridad:**")
                     if col_prio_m:
+                        st.write("**Prioridades:**")
                         res_prio = pd.crosstab(m[col_resp_m], m[col_prio_m], margins=True, margins_name="TOTAL")
                         st.dataframe(res_prio, use_container_width=True)
                     
-                    d_vert = processar_vertical(d, [col_id_d], col_tels_d, 'RESPONSAVEL_FINAL', col_doc_d)
-                    zip_f = gerar_zip_completo(m, d_vert, col_resp_m, 'RESPONSAVEL_FINAL', col_doc_m, "MANHA")
-                    st.success(f"✅ ¡Todo listo!")
-                    st.download_button("📥 DESCARGAR KIT", zip_f, "Michelin_Kit_V41.zip", "application/zip", type="primary")
+                    # Verticalizamos usando las columnas SINCRONIZADAS
+                    d_vert = processar_vertical(d, [col_id_d], col_tels_d, 'RESPONSAVEL_FINAL', 'PERFIL_FINAL')
+                    
+                    zip_f = gerar_zip_completo(m, d_vert, col_resp_m, 'RESPONSAVEL_FINAL', 'PERFIL_FINAL', "MANHA")
+                    st.success("✅ ¡Archivos generados correctamente!")
+                    st.download_button("📥 DESCARGAR KIT", zip_f, "Michelin_Kit_V42.zip", "application/zip", type="primary")
 
         elif modo == "☀️ Tarde":
             if file_log:
                 if st.button("🔄 REFUERZO"):
-                    m, d, _ = motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m)
+                    m, d, _ = motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m, col_doc_m)
                     try:
                         df_log = pd.read_csv(file_log, sep=None, engine='python') if file_log.name.endswith('.csv') else pd.read_excel(file_log)
                         col_log_id = df_log.columns[0]
                         ids_out = df_log[col_log_id].astype(str).unique()
+                        
                         d['KEY_TEMP'] = d[col_id_d].astype(str)
                         d_tarde = d[~d['KEY_TEMP'].isin(ids_out)].copy()
-                        d_tarde['PERFIL'] = d_tarde[col_doc_d].apply(identificar_perfil_doc)
-                        d_tarde = d_tarde[d_tarde['PERFIL'] == 'PEQUENO FROTISTA']
-                        d_vert = processar_vertical(d_tarde, [col_id_d], col_tels_d, 'RESPONSAVEL_FINAL', col_doc_d)
+                        # Usamos PERFIL_FINAL sincronizado
+                        d_tarde = d_tarde[d_tarde['PERFIL_FINAL'] == 'PEQUENO FROTISTA']
+                        
+                        d_vert = processar_vertical(d_tarde, [col_id_d], col_tels_d, 'RESPONSAVEL_FINAL', 'PERFIL_FINAL')
                         st.write(f"Refuerzo: {len(d_vert)} registros.")
-                        zip_t = gerar_zip_completo(None, d_vert, None, 'RESPONSAVEL_FINAL', col_doc_d, "TARDE")
+                        zip_t = gerar_zip_completo(None, d_vert, None, 'RESPONSAVEL_FINAL', 'PERFIL_FINAL', "TARDE")
                         st.download_button("📥 DESCARGAR", zip_t, "Refuerzo_Tarde.zip", "application/zip", type="primary")
                     except Exception as e: st.error(f"Error: {e}")
             else: st.info("Sube el Log.")
