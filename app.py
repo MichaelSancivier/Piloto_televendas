@@ -8,7 +8,7 @@ import numpy as np
 import random
 
 # ==============================================================================
-# 1. SETUP VISUAL & ESTILO
+# 1. SETUP VISUAL
 # ==============================================================================
 st.set_page_config(
     page_title="Michelin Pilot Command Center",
@@ -22,7 +22,7 @@ st.markdown("""
     .main { background-color: #f4f6f9; }
     h1 { color: #003366; font-family: 'Helvetica', sans-serif; font-weight: bold; }
     
-    /* Botões */
+    /* Botão Principal */
     .stButton>button { 
         width: 100%; border-radius: 8px; height: 4em; font-weight: bold; font-size: 18px !important;
         background-color: #003366; color: white; border: 2px solid #004080; 
@@ -30,13 +30,12 @@ st.markdown("""
     }
     .stButton>button:hover { background-color: #FCE500; color: #003366; border-color: #003366; transform: scale(1.02); }
     
-    /* Caixas de Status */
+    /* Alertas */
     .audit-box-success { padding: 15px; background-color: #d4edda; color: #155724; border-left: 5px solid #28a745; border-radius: 4px; margin-bottom: 10px; }
     .audit-box-danger { padding: 15px; background-color: #f8d7da; color: #721c24; border-left: 5px solid #dc3545; border-radius: 4px; margin-bottom: 10px; }
     
-    /* Caixa de Instrução */
-    .info-box { padding: 25px; background-color: #ffffff; border-radius: 10px; border: 1px solid #e0e0e0; margin-top: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
-    .step-number { font-weight: bold; color: #003366; background-color: #FCE500; padding: 2px 8px; border-radius: 50%; margin-right: 8px; }
+    /* Guia */
+    .info-box { padding: 20px; background-color: #fff; border-radius: 8px; border: 1px solid #ddd; margin-bottom: 20px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -77,7 +76,7 @@ def tratar_telefone(val):
     return (f"+55{final}", tipo) if final else (None, tipo)
 
 # ==============================================================================
-# 3. MOTOR DE DISTRIBUIÇÃO
+# 3. MOTOR DE DISTRIBUIÇÃO (COM TRAVA DE SEGURANÇA)
 # ==============================================================================
 
 def motor_distribuicao_sincronizado(df_mailing, df_discador, col_id_m, col_id_d, col_resp_m, col_prio_m):
@@ -88,14 +87,14 @@ def motor_distribuicao_sincronizado(df_mailing, df_discador, col_id_m, col_id_d,
     mestre['KEY_MATCH'] = mestre[col_id_m].astype(str).str.strip().str.upper()
     escravo['KEY_MATCH'] = escravo[col_id_d].astype(str).str.strip().str.upper()
     
-    # 1. VALIDAÇÃO DE AGENTES (TRAVA DE SEGURANÇA)
+    # 1. VALIDAÇÃO DE AGENTES (A TRAVA!)
     termos_ignorar = ['CANAL TELEVENDAS', 'TIME', 'EQUIPE', 'TELEVENDAS', 'NULL', 'NAN', '', 'BACKLOG', 'SEM DONO']
     todos_nomes = mestre[col_resp_m].unique()
     agentes_validos = [n for n in todos_nomes if pd.notna(n) and str(n).strip().upper() not in termos_ignorar]
     
-    # Se detectar mais de 20 agentes, provavelmente selecionou a coluna errada (ID)
-    if len(agentes_validos) > 20:
-        return None, None, f"🚨 ERRO DE CONFIGURAÇÃO: Detectados {len(agentes_validos)} atendentes diferentes. Você provavelmente selecionou a coluna de ID no lugar da coluna 'Responsável' na barra lateral."
+    # Se tiver mais de 25 nomes diferentes, é quase certeza que selecionou ID errado
+    if len(agentes_validos) > 25:
+        return None, None, f"🚨 ERRO CRÍTICO: O sistema detectou {len(agentes_validos)} atendentes diferentes. Isso não é normal. \n\nVocê provavelmente selecionou a coluna de **ID/CONTRATO** no campo 'Responsável' em vez da coluna de **NOMES** (Lilian, Susana, etc). Verifique a barra lateral."
 
     if not agentes_validos:
         return None, None, "❌ Erro: Nenhum atendente válido encontrado. Verifique a coluna selecionada."
@@ -134,7 +133,7 @@ def motor_distribuicao_sincronizado(df_mailing, df_discador, col_id_m, col_id_d,
     else:
         escravo['RESPONSAVEL_FINAL'] = escravo['RESPONSAVEL_FINAL'].fillna("SEM_MATCH")
 
-    return mestre, escravo, f"✅ Sucesso! {total_orfaos} leads distribuídos entre: {', '.join(agentes_validos[:5])}..."
+    return mestre, escravo, f"✅ Sucesso! {total_orfaos} leads distribuídos."
 
 # ==============================================================================
 # 4. PROCESSAMENTO FINAL
@@ -157,6 +156,10 @@ def gerar_zip_sincronizado(df_mailing, df_discador, col_resp_m, col_resp_d, col_
         # DISCADOR
         if df_discador is not None:
             agentes = df_discador[col_resp_d].unique()
+            # Trava Extra na Geração
+            if len(agentes) > 25:
+                return None # Aborta se tiver muitos agentes (erro de ID)
+
             for agente in agentes:
                 nome_safe = normalizar_nome_arquivo(agente)
                 if nome_safe in ["SEM_DONO", "NAO_ENCONTRADO", "NAN", "SEM_MATCH"]: continue
@@ -199,27 +202,17 @@ def gerar_zip_sincronizado(df_mailing, df_discador, col_resp_m, col_resp_d, col_
 # 5. FRONTEND
 # ==============================================================================
 
-st.title("🚛 Michelin Pilot Command Center")
-st.markdown("### Estratégia de Televentas & Logística")
+st.title("🚛 Michelin Pilot V34 (Safe Mode)")
+st.markdown("---")
 
-# --- GUIA DE USO (EXPANDER NO TOPO) ---
-with st.expander("📖 Guia Rápido de Uso (Clique para abrir)", expanded=False):
+# GUIA RÁPIDO
+with st.expander("📖 **LEIA ANTES DE COMEÇAR (Evite Erros)**", expanded=False):
     st.markdown("""
-    #### 📋 Pré-requisitos
-    1. **Arquivo Excel:** Deve conter duas abas chamadas exatamente **'Discador'** e **'Mailing'**.
-    2. **Chave Única:** Ambas as abas devem ter uma coluna em comum (ex: ID Contrato) para cruzar os dados.
-
-    #### 🌅 Operação Manhã (08:00)
-    1. Selecione o turno **"Manhã"** na barra lateral.
-    2. Suba o arquivo Excel.
-    3. **Atenção:** Na seleção de colunas, cuide para selecionar a coluna com **NOMES** (Lilian, Susana) em "Responsável", e não a coluna de IDs.
-    4. Clique no botão azul para gerar os arquivos. O sistema vai distribuir tudo o que está "Sem Dono".
-
-    #### ☀️ Operação Tarde (14:00)
-    1. Baixe o relatório do seu discador (Log).
-    2. Mude o turno para **"Tarde"** na barra lateral.
-    3. Suba o Excel Mestre + o Log do Discador.
-    4. O sistema vai remover quem já foi atendido e gerar uma lista de reforço apenas para Frotistas.
+    1. **Mailing (Mestre):** É aqui que você define quem trabalha.
+       - Coluna **ID**: Deve ser o Contrato ou Código Único.
+       - Coluna **RESPONSÁVEL**: Deve ter nomes (Lilian, Susana). **Não selecione IDs aqui!**
+    2. **Discador (Escravo):** Ele obedece o Mailing.
+       - Coluna **ID**: Deve ser igual à do Mailing para cruzar.
     """)
 
 with st.sidebar:
@@ -232,7 +225,6 @@ if uploaded_file:
     xls = pd.ExcelFile(uploaded_file)
     sheets_upper = [s.upper() for s in xls.sheet_names]
     
-    # Validação de Abas mais flexível (case insensitive)
     aba_d_real = next((s for s in xls.sheet_names if 'DISC' in s.upper()), None)
     aba_m_real = next((s for s in xls.sheet_names if 'MAIL' in s.upper()), None)
     
@@ -259,11 +251,11 @@ if uploaded_file:
         idx_resp_m = next((i for i, c in enumerate(cols_m) if 'RESP' in c.upper()), 0)
         sel_resp_m = c1.selectbox("Coluna RESPONSÁVEL (Nomes):", cols_m, index=idx_resp_m)
         
-        # PREVIEW DE SEGURANÇA
-        amostra_resp = df_m[sel_resp_m].dropna().unique()[:5]
-        c1.caption(f"👀 Exemplos encontrados: {', '.join(map(str, amostra_resp))}")
-        if len(amostra_resp) > 0 and len(str(amostra_resp[0])) > 15 and str(amostra_resp[0]).isnumeric():
-            c1.error("⚠️ CUIDADO: Isso parece um ID, não um Nome!")
+        # --- PREVIEW DE SEGURANÇA ---
+        amostra_resp = df_m[sel_resp_m].dropna().unique()[:3]
+        st.caption(f"👀 **O sistema leu:** {', '.join(map(str, amostra_resp))}...")
+        if len(amostra_resp) > 0 and str(amostra_resp[0]).replace('.','').isnumeric():
+            st.error("⚠️ **PARE!** Você selecionou uma coluna de NÚMEROS. Mude para a coluna de NOMES.")
             
         sel_id_m = c1.selectbox("Coluna ID Único:", cols_m, index=0)
         sel_prio_m = c1.selectbox("Coluna Prioridade:", ["(Sem Prioridade)"] + cols_m)
@@ -293,18 +285,3 @@ if uploaded_file:
                 
                 if zip_final:
                     st.download_button("📥 BAIXAR CORRETAMENTE", zip_final, "Pack_Final.zip", "application/zip", type="primary")
-
-    elif modo == "☀️ Tarde":
-        st.info("Para a tarde, suba o Log na barra lateral.")
-        # Lógica da tarde omitida para brevidade (já estava no código anterior),
-        # mas a estrutura do app está pronta para receber.
-
-else:
-    # CARTÃO DE BOAS VINDAS (QUANDO VAZIO)
-    st.markdown("""
-        <div class="info-box">
-            <h3>👋 Bem-vindo ao Michelin Pilot</h3>
-            <p>Para começar, <b>arraste seu arquivo Excel</b> para a barra lateral esquerda.</p>
-            <p style='font-size: 14px; color: #666;'>O arquivo deve conter as abas <b>'Discador'</b> e <b>'Mailing'</b>.</p>
-        </div>
-    """, unsafe_allow_html=True)
