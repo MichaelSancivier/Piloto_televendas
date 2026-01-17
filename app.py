@@ -25,6 +25,7 @@ st.markdown("""
     .auto-success { padding: 15px; background-color: #d4edda; color: #155724; border-left: 5px solid #28a745; margin-bottom: 10px; border-radius: 5px;}
     .auto-error { padding: 15px; background-color: #f8d7da; color: #721c24; border-left: 5px solid #dc3545; margin-bottom: 10px; border-radius: 5px;}
     div[data-testid="stDataFrame"] { width: 100%; }
+    h3 { color: #003366; border-bottom: 2px solid #FCE500; padding-bottom: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -170,9 +171,7 @@ def gerar_zip_completo(df_m, df_d_vert, col_resp_m, col_resp_d, col_doc_m, modo=
 
         # --- MAILING (Manhã/Almoço) ---
         if modo == "MANHA" and df_m is not None:
-            # Aqui estava o erro: passamos a coluna explícita agora (col_doc_m)
             df_m['PERFIL_TEMP'] = df_m[col_doc_m].apply(identificar_perfil_doc)
-            
             for ag in df_m[col_resp_m].unique():
                 safe = normalizar_nome_arquivo(ag)
                 if safe in ["SEM_DONO"]: continue
@@ -181,7 +180,6 @@ def gerar_zip_completo(df_m, df_d_vert, col_resp_m, col_resp_d, col_doc_m, modo=
                 # Split também no Mailing
                 fr = df_a[df_a['PERFIL_TEMP'] == "PEQUENO FROTISTA"]
                 fre = df_a[df_a['PERFIL_TEMP'] == "FRETEIRO"]
-                
                 if not fr.empty:
                     d = io.BytesIO(); fr.to_excel(d, index=False)
                     zf.writestr(f"{safe}_MAILING_MANHA_Frotista.xlsx", d.getvalue())
@@ -196,7 +194,7 @@ def gerar_zip_completo(df_m, df_d_vert, col_resp_m, col_resp_d, col_doc_m, modo=
 # 5. FRONTEND
 # ==============================================================================
 
-st.title("🚛 Michelin Pilot V40 (4 Outputs)")
+st.title("🚛 Michelin Pilot V41 (Audit Full)")
 st.markdown("---")
 
 with st.sidebar:
@@ -234,29 +232,32 @@ if file_main:
                 m, d, audit = motor_distribuicao_quirurgico(df_m, df_d, col_id_m, col_id_d, col_resp_m, col_prio_m)
                 
                 if m is not None:
+                    # METRICAS
                     total_base = len(m); qtd_agentes = len(audit); meta = total_base // qtd_agentes
                     
-                    st.subheader("📊 Resultados")
-                    k1, k2, k3 = st.columns(3)
-                    k1.metric("Total Base", total_base); k2.metric("Agentes", qtd_agentes); k3.metric("Meta", meta)
+                    st.subheader("📊 Auditoría de Balanceo")
                     
+                    # LINHA 1: AUDIT (CARTERA) + PERFIL (NOVA)
                     c1, c2 = st.columns(2)
-                    c1.write("**Cartera (Inicio vs Fin):**")
+                    c1.write("**1. Movimientos en Cartera:**")
                     c1.dataframe(audit.style.format("{:.0f}"), use_container_width=True)
                     
+                    # A NOVA TABELA AQUI:
+                    c2.write("**2. Distribución Perfil (Mañana/Tarde):**")
+                    m['PERFIL_VISUAL'] = m[col_doc_m].apply(identificar_perfil_doc)
+                    res_perfil = pd.crosstab(m[col_resp_m], m['PERFIL_VISUAL'], margins=True, margins_name="TOTAL")
+                    c2.dataframe(res_perfil, use_container_width=True)
+                    
+                    # LINHA 2: PRIORIDADES (GRANDE)
+                    st.write("**3. Detalle por Prioridad:**")
                     if col_prio_m:
-                        c2.write("**Prioridades (Con Total):**")
                         res_prio = pd.crosstab(m[col_resp_m], m[col_prio_m], margins=True, margins_name="TOTAL")
-                        c2.dataframe(res_prio, use_container_width=True)
+                        st.dataframe(res_prio, use_container_width=True)
                     
-                    # Processa
                     d_vert = processar_vertical(d, [col_id_d], col_tels_d, 'RESPONSAVEL_FINAL', col_doc_d)
-                    
-                    # ZIP (Passando a coluna de Doc do Mailing explicitamente)
                     zip_f = gerar_zip_completo(m, d_vert, col_resp_m, 'RESPONSAVEL_FINAL', col_doc_m, "MANHA")
-                    
-                    st.success(f"✅ Archivos generados correctamente (4 por persona).")
-                    st.download_button("📥 DESCARGAR KIT", zip_f, "Michelin_Kit_V40.zip", "application/zip", type="primary")
+                    st.success(f"✅ ¡Todo listo!")
+                    st.download_button("📥 DESCARGAR KIT", zip_f, "Michelin_Kit_V41.zip", "application/zip", type="primary")
 
         elif modo == "☀️ Tarde":
             if file_log:
@@ -266,12 +267,10 @@ if file_main:
                         df_log = pd.read_csv(file_log, sep=None, engine='python') if file_log.name.endswith('.csv') else pd.read_excel(file_log)
                         col_log_id = df_log.columns[0]
                         ids_out = df_log[col_log_id].astype(str).unique()
-                        
                         d['KEY_TEMP'] = d[col_id_d].astype(str)
                         d_tarde = d[~d['KEY_TEMP'].isin(ids_out)].copy()
                         d_tarde['PERFIL'] = d_tarde[col_doc_d].apply(identificar_perfil_doc)
                         d_tarde = d_tarde[d_tarde['PERFIL'] == 'PEQUENO FROTISTA']
-                        
                         d_vert = processar_vertical(d_tarde, [col_id_d], col_tels_d, 'RESPONSAVEL_FINAL', col_doc_d)
                         st.write(f"Refuerzo: {len(d_vert)} registros.")
                         zip_t = gerar_zip_completo(None, d_vert, None, 'RESPONSAVEL_FINAL', col_doc_d, "TARDE")
