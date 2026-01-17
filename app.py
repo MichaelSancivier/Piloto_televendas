@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import io
@@ -8,7 +7,7 @@ import unicodedata
 import numpy as np
 
 # ==============================================================================
-# 1. CONFIGURAÇÃO VISUAL (CLEAN)
+# 1. CONFIGURAÇÃO VISUAL
 # ==============================================================================
 st.set_page_config(
     page_title="Michelin Pilot Command Center",
@@ -28,16 +27,15 @@ st.markdown("""
     .stButton>button:hover { background-color: #004080; color: white; }
     .stMetric { background-color: white; padding: 15px; border-radius: 8px; border-left: 6px solid #FCE500; box-shadow: 0 2px 5px rgba(0,0,0,0.05);}
     div[data-testid="stExpander"] { background-color: white; border-radius: 8px; }
-    .audit-box-success { padding: 15px; background-color: #d4edda; color: #155724; border-radius: 8px; border: 1px solid #c3e6cb; margin-bottom: 20px; }
-    .audit-box-danger { padding: 15px; background-color: #f8d7da; color: #721c24; border-radius: 8px; border: 1px solid #f5c6cb; margin-bottom: 20px; }
     
-    /* Destaque para upload na Tab 3 */
-    .upload-log-box { border: 2px dashed #003366; padding: 20px; border-radius: 10px; background-color: #e8f4f8; text-align: center; }
+    /* Destaques de Auditoria */
+    .audit-box-success { padding: 10px; background-color: #d4edda; color: #155724; border-radius: 5px; border: 1px solid #c3e6cb; margin-bottom: 10px; }
+    .audit-box-danger { padding: 10px; background-color: #f8d7da; color: #721c24; border-radius: 5px; border: 1px solid #f5c6cb; margin-bottom: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. INTELIGÊNCIA LÓGICA
+# 2. INTELIGÊNCIA LÓGICA (BACKEND)
 # ==============================================================================
 
 def normalizar_nome_arquivo(nome):
@@ -48,7 +46,7 @@ def normalizar_nome_arquivo(nome):
     return re.sub(r'_+', '_', limpo).strip('_')
 
 def identificar_perfil_pelo_doc(valor):
-    """ Regra Binária: 14 = Frotista | Outros = Freteiro """
+    """ Regra Binária: 14 digitos = Frotista | Resto = Freteiro """
     if pd.isna(valor): return "FRETEIRO"
     doc_limpo = re.sub(r'\D', '', str(valor))
     if len(doc_limpo) == 14: return "PEQUENO FROTISTA"
@@ -110,15 +108,13 @@ def processar_distribuicao_mailing(df, col_doc, col_resp):
 def processar_feedback_tarde(df_mestre, df_log, col_id_mestre, col_id_log, col_resp, col_doc):
     ids_trabalhados = df_log[col_id_log].astype(str).unique()
     
-    # Normaliza ID Mestre para string para garantir o match
-    # Pega o primeiro ID da lista de IDs selecionados pelo usuário
     col_id_uso = col_id_mestre[0]
     df_mestre['TEMP_ID_MATCH'] = df_mestre[col_id_uso].astype(str)
     
-    # Filtra: Mantém apenas quem NÃO está na lista de ids_trabalhados
+    # Remove quem já foi trabalhado
     df_pendente = df_mestre[~df_mestre['TEMP_ID_MATCH'].isin(ids_trabalhados)].copy()
     
-    # Filtra estratégia (Apenas Frotistas são o foco da Tarde, pois Freteiros já rodaram no almoço)
+    # Foco total na Tarde: Frotistas
     df_pendente['ESTRATEGIA'] = df_pendente[col_doc].apply(identificar_perfil_pelo_doc)
     df_tarde = df_pendente[df_pendente['ESTRATEGIA'] == 'PEQUENO FROTISTA']
     
@@ -140,10 +136,193 @@ def gerar_zip_dinamico(df_dados, col_resp, col_segmentacao, modo="DISCADOR"):
             if modo == "FEEDBACK_TARDE":
                 data = io.BytesIO()
                 df_agente.to_excel(data, index=False)
-                zip_file.writestr(f"DISCADOR_{nome_arquivo}_REFORCO_TARDE.xlsx", data.getvalue())
+                zip_file.writestr(f"DISCADOR_{nome_arquivo}_REFORCO_TARDE_Frotista.xlsx", data.getvalue())
             else:
                 col_seg_uso = 'ESTRATEGIA_PERFIL' if modo == "DISCADOR" else col_segmentacao
                 df_frotista = df_agente[df_agente[col_seg_uso] == "PEQUENO FROTISTA"]
                 df_freteiro = df_agente[df_agente[col_seg_uso] == "FRETEIRO"]
                 
-                prefixo = "DISCADOR
+                prefixo = "DISCADOR" if modo == "DISCADOR" else "MAILING"
+                pasta = nome_arquivo
+                if not df_frotista.empty:
+                    data = io.BytesIO()
+                    df_frotista.to_excel(data, index=False)
+                    zip_file.writestr(f"{pasta}/{prefixo}_1_MANHA_Frotista_CNPJ.xlsx", data.getvalue())
+                if not df_freteiro.empty:
+                    data = io.BytesIO()
+                    df_freteiro.to_excel(data, index=False)
+                    zip_file.writestr(f"{pasta}/{prefixo}_2_ALMOCO_Freteiro_CPF.xlsx", data.getvalue())
+
+    zip_buffer.seek(0)
+    return zip_buffer
+
+# ==============================================================================
+# 4. FRONTEND CENTRALIZADO
+# ==============================================================================
+
+st.title("🚛 Michelin Pilot Command Center")
+st.markdown("### Estratégia de Televentas & Logística")
+st.markdown("---")
+
+# --- BARRA LATERAL UNIFICADA ---
+with st.sidebar:
+    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Michelin_Logo.svg/1200px-Michelin_Logo.svg.png", width=150)
+    
+    st.header("🎮 Controle da Missão")
+    
+    # O SELETOR MÁGICO
+    modo_operacao = st.radio("Qual o turno atual?", 
+             ("🌅 Manhã (Carga Inicial)", "☀️ Tarde (Reprocessamento)"))
+    
+    st.markdown("---")
+    
+    # UPLOAD 1: SEMPRE VISÍVEL (BASE MESTRE)
+    st.subheader("1. Arquivo Mestre")
+    uploaded_file = st.file_uploader("Solte o Excel Geral aqui", type=["xlsx"], key="main_upload")
+    
+    # UPLOAD 2: SÓ APARECE NA TARDE
+    uploaded_log = None
+    if modo_operacao == "☀️ Tarde (Reprocessamento)":
+        st.markdown("---")
+        st.subheader("2. Log do Discador")
+        st.info("Necessário para remover quem já foi atendido.")
+        uploaded_log = st.file_uploader("Solte o CSV/Excel do Log aqui", type=["csv", "xlsx"], key="log_upload")
+
+# --- ÁREA PRINCIPAL ---
+if uploaded_file:
+    xls = pd.ExcelFile(uploaded_file)
+    all_sheets = xls.sheet_names
+    
+    # Auditoria Rápida (Sempre útil)
+    aba_d_audit = next((s for s in all_sheets if 'DISCADOR' in s.upper()), None)
+    aba_m_audit = next((s for s in all_sheets if 'MAILING' in s.upper()), None)
+    
+    if aba_d_audit and aba_m_audit:
+        df_audit_d = pd.read_excel(uploaded_file, sheet_name=aba_d_audit)
+        df_audit_m = pd.read_excel(uploaded_file, sheet_name=aba_m_audit)
+        diff = abs(len(df_audit_d) - len(df_audit_m))
+        col_aud1, col_aud2 = st.columns([3,1])
+        if diff != 0: 
+            col_aud1.warning(f"⚠️ Atenção: Divergência de {diff} linhas entre as abas.")
+    
+    # --- LOGICA DE EXIBIÇÃO ---
+    
+    if modo_operacao == "🌅 Manhã (Carga Inicial)":
+        # MOSTRA ABAS DE CARGA NORMAL
+        tab1, tab2 = st.tabs(["🤖 DISCADOR (Manhã)", "👩‍💼 MAILING"])
+        
+        with tab1:
+            col_sel, _ = st.columns([1,1])
+            aba_d = col_sel.selectbox("Aba Discador:", all_sheets, index=all_sheets.index(aba_d_audit) if aba_d_audit else 0, key='d1')
+            df_d = pd.read_excel(uploaded_file, sheet_name=aba_d)
+            cols_d = df_d.columns.tolist()
+            
+            sug_tel = [c for c in cols_d if any(x in c.upper() for x in ['TEL','CEL','FONE'])]
+            sug_id = [c for c in cols_d if any(x in c.upper() for x in ['ID','NOME'])]
+            sug_doc = next((c for c in cols_d if 'CNPJ' in c.upper() or 'CPF' in c.upper()), None)
+            sug_resp = next((c for c in cols_d if 'RESPONSAVEL' in c.upper()), cols_d[0])
+            
+            with st.expander("⚙️ Configurar Colunas", expanded=True):
+                c1, c2 = st.columns(2)
+                sel_resp_d = c1.selectbox("Responsável:", cols_d, index=cols_d.index(sug_resp) if sug_resp in cols_d else 0, key='d_resp')
+                sel_doc_d = c1.selectbox("CPF/CNPJ:", cols_d, index=cols_d.index(sug_doc) if sug_doc in cols_d else 0, key='d_doc')
+                sel_id_d = c2.multiselect("ID Cliente:", cols_d, default=sug_id[:3], key='d_id')
+                sel_tel_d = c2.multiselect("Telefones:", cols_d, default=sug_tel, key='d_tel')
+                aplicar_bal_d = st.checkbox("Distribuir leads sem dono?", value=True, key='chk_bal_d')
+
+            if st.button("🚀 GERAR PACK MANHÃ (08:00)", key='btn_discador'):
+                with st.spinner("Processando Manhã..."):
+                    df_trabalho = df_d.copy()
+                    if aplicar_bal_d: df_trabalho, _, _ = distribuir_leads_orfãos(df_d, sel_resp_d)
+                    df_res_d = processar_discador(df_trabalho, sel_id_d, sel_tel_d, sel_resp_d, sel_doc_d)
+                    zip_d = gerar_zip_dinamico(df_res_d, sel_resp_d, None, "DISCADOR") 
+                    st.success("Lista da Manhã Pronta!")
+                    st.download_button("📥 BAIXAR PACK MANHÃ", zip_d, "Discador_Manha.zip", "application/zip")
+
+        with tab2:
+            # MAILING SIMPLIFICADO
+            col_sel_m, _ = st.columns([1,1])
+            aba_m = col_sel_m.selectbox("Aba Mailing:", all_sheets, index=all_sheets.index(aba_m_audit) if aba_m_audit else 0, key='m1')
+            df_m = pd.read_excel(uploaded_file, sheet_name=aba_m)
+            cols_m = df_m.columns.tolist()
+            sug_doc_m = next((c for c in cols_m if 'CNPJ' in c.upper() or 'CPF' in c.upper()), None)
+            sug_resp_m = next((c for c in cols_m if 'RESPONSAVEL' in c.upper()), cols_m[0])
+            
+            with st.expander("⚙️ Configurar Colunas"):
+                c1, c2 = st.columns(2)
+                sel_resp_m = c1.selectbox("Responsável:", cols_m, index=cols_m.index(sug_resp_m) if sug_resp_m in cols_m else 0, key='m_resp')
+                sel_doc_m = c2.selectbox("CPF/CNPJ:", cols_m, index=cols_m.index(sug_doc_m) if sug_doc_m in cols_m else 0, key='m_doc')
+                aplicar_bal_m = st.checkbox("Distribuir leads sem dono?", value=True, key='chk_bal_m')
+            
+            if st.button("📦 PROCESSAR MAILING", key='btn_mailing'):
+                with st.spinner("Gerando Mailing..."):
+                    df_trabalho_m = df_m.copy()
+                    if aplicar_bal_m: df_trabalho_m, _, _ = distribuir_leads_orfãos(df_m, sel_resp_m)
+                    df_classificado = processar_distribuicao_mailing(df_trabalho_m, sel_doc_m, sel_resp_m)
+                    zip_m = gerar_zip_dinamico(df_classificado, sel_resp_m, "PERFIL_CALCULADO", "MAILING")
+                    st.success("Mailing Pronto!")
+                    st.download_button("📥 BAIXAR MAILING", zip_m, "Mailing.zip", "application/zip")
+
+    elif modo_operacao == "☀️ Tarde (Reprocessamento)":
+        # MODO TARDE: FOCO TOTAL NO FEEDBACK
+        st.subheader("🔄 Reprocessamento para Tarde (14:00)")
+        
+        if not uploaded_log:
+            st.info("👈 Por favor, carregue o **Log do Discador** na barra lateral (item 2) para continuar.")
+        else:
+            # Lógica da Tarde
+            try:
+                if uploaded_log.name.endswith('.csv'): df_log = pd.read_csv(uploaded_log, sep=None, engine='python')
+                else: df_log = pd.read_excel(uploaded_log)
+                
+                st.markdown(f'<div class="audit-box-success">✅ Log Carregado: {len(df_log)} registros processados na manhã.</div>', unsafe_allow_html=True)
+                
+                # Precisamos ler a base mestre novamente para pegar as colunas
+                aba_d = next((s for s in all_sheets if 'DISCADOR' in s.upper()), all_sheets[0])
+                df_d = pd.read_excel(uploaded_file, sheet_name=aba_d)
+                cols_d = df_d.columns.tolist()
+                
+                # Sugestões rápidas
+                sug_tel = [c for c in cols_d if any(x in c.upper() for x in ['TEL','CEL','FONE'])]
+                sug_id = [c for c in cols_d if any(x in c.upper() for x in ['ID','NOME'])]
+                sug_doc = next((c for c in cols_d if 'CNPJ' in c.upper() or 'CPF' in c.upper()), None)
+                sug_resp = next((c for c in cols_d if 'RESPONSAVEL' in c.upper()), cols_d[0])
+
+                with st.expander("⚙️ Configuração de Cruzamento (Match)", expanded=True):
+                    c1, c2 = st.columns(2)
+                    st.markdown("**1. Na Base Mestre:**")
+                    sel_resp_d = c1.selectbox("Responsável:", cols_d, index=cols_d.index(sug_resp) if sug_resp in cols_d else 0, key='t_resp')
+                    sel_doc_d = c1.selectbox("CPF/CNPJ:", cols_d, index=cols_d.index(sug_doc) if sug_doc in cols_d else 0, key='t_doc')
+                    sel_id_d = c1.multiselect("ID Cliente (Chave Única):", cols_d, default=sug_id[:1], key='t_id') # Só 1 ID para match
+                    sel_tel_d = c1.multiselect("Telefones (Para Discar):", cols_d, default=sug_tel, key='t_tel')
+                    
+                    st.markdown("**2. No Log do Discador:**")
+                    col_id_log = c2.selectbox("Qual coluna do Log tem o ID do Cliente?", df_log.columns)
+                    st.caption("O sistema vai remover da lista quem tiver esse ID no Log.")
+
+                if st.button("🔄 CRUZAR DADOS E GERAR LISTA TARDE"):
+                    if not sel_id_d or not col_id_log:
+                        st.error("Selecione as colunas de ID em ambos os arquivos para fazer o match.")
+                    else:
+                        with st.spinner("Filtrando base..."):
+                            # Balanceamento prévio (opcional, mas bom manter coerência)
+                            df_trabalho, _, _ = distribuir_leads_orfãos(df_d, sel_resp_d)
+                            
+                            df_tarde_limpa, qtd = processar_feedback_tarde(
+                                df_trabalho, df_log, sel_id_d, col_id_log, sel_resp_d, sel_doc_d
+                            )
+                            
+                            if df_tarde_limpa.empty:
+                                st.warning("Nenhum registro restou para a tarde. Todos os Frotistas já foram trabalhados ou não existem.")
+                            else:
+                                df_res_tarde = processar_discador(df_tarde_limpa, sel_id_d, sel_tel_d, sel_resp_d, sel_doc_d)
+                                zip_tarde = gerar_zip_dinamico(df_res_tarde, sel_resp_d, None, "FEEDBACK_TARDE")
+                                
+                                st.success(f"Lista da Tarde Pronta! {qtd} registros da manhã foram removidos.")
+                                st.download_button("📥 BAIXAR REFORÇO TARDE", zip_tarde, "Discador_Tarde.zip", "application/zip")
+
+            except Exception as e:
+                st.error(f"Erro ao processar Log: {e}")
+
+else:
+    st.info("👈 Comece selecionando o turno e carregando o arquivo na barra lateral.")
