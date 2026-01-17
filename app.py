@@ -5,6 +5,7 @@ import re
 import zipfile
 import unicodedata
 import numpy as np
+import random
 
 # ==============================================================================
 # 1. CONFIGURAÇÃO VISUAL
@@ -81,22 +82,47 @@ def distribuir_leads_orfãos(df, col_resp, col_prioridade=None):
     
     if not agentes_humanos: return df_proc, "Sem equipe humana.", 0
     
-    # Identifica Backlog (Sem dono)
+    # Identifica Backlog
     mask_orfao = df_proc[col_resp].isna() | df_proc[col_resp].astype(str).str.strip().str.upper().isin(termos_ignorar)
     
-    # ORDENAÇÃO POR PRIORIDADE (Se existir)
-    # Isso garante que a distribuição comece pelos VIPs
+    # --- NOVO SISTEMA DE JUSTIÇA (EMBARALHAMENTO) ---
     if col_prioridade and col_prioridade in df_proc.columns:
-        indices_orfaos = df_proc[mask_orfao].sort_values(by=col_prioridade, ascending=True).index
+        # Pega as prioridades únicas
+        prioridades = df_proc.loc[mask_orfao, col_prioridade].unique()
+        # Tenta ordenar
+        try: prioridades = sorted(prioridades)
+        except: pass
+
+        for prio in prioridades:
+            # Filtra apenas os órfãos desta prioridade
+            mask_prio = mask_orfao & (df_proc[col_prioridade] == prio)
+            qtd_prio = mask_prio.sum()
+            
+            if qtd_prio > 0:
+                # IMPORTANTE: Embaralha a ordem dos agentes a cada rodada de prioridade
+                # Isso evita que o primeiro da lista sempre pegue a "sobra" e fique com mais leads
+                equipe_rodada = agentes_humanos.copy()
+                random.shuffle(equipe_rodada)
+                
+                atribuicoes = np.resize(equipe_rodada, qtd_prio)
+                df_proc.loc[mask_prio, col_resp] = atribuicoes
+                
+        msg = f"Sucesso! Distribuição balanceada (Randomizada) por prioridade '{col_prioridade}'."
+    
     else:
+        # Sem prioridade: distribui tudo aleatório
         indices_orfaos = df_proc[mask_orfao].index
+        qtd_orfaos = len(indices_orfaos)
+        if qtd_orfaos > 0:
+            equipe_rodada = agentes_humanos.copy()
+            random.shuffle(equipe_rodada)
+            atribuicoes = np.resize(equipe_rodada, qtd_orfaos)
+            df_proc.loc[indices_orfaos, col_resp] = atribuicoes
+            msg = f"Sucesso! {qtd_orfaos} leads distribuídos."
+        else:
+            msg = "Base completa."
 
-    qtd_orfaos = len(indices_orfaos)
-    if qtd_orfaos == 0: return df_proc, "Base completa.", 0
-
-    atribuicoes = np.resize(agentes_humanos, qtd_orfaos)
-    df_proc.loc[indices_orfaos, col_resp] = atribuicoes
-    return df_proc, f"Sucesso! {qtd_orfaos} leads do Backlog distribuídos.", qtd_orfaos
+    return df_proc, msg, mask_orfao.sum()
 
 def processar_discador(df, col_id, cols_tel, col_resp, col_doc, col_prio=None):
     df_trab = df.copy()
@@ -203,6 +229,7 @@ if uploaded_file:
     if modo_operacao == "🌅 Manhã (Carga Inicial)":
         tab1, tab2 = st.tabs(["🤖 DISCADOR (Manhã)", "👩‍💼 MAILING"])
         
+        # --- DISCADOR ---
         with tab1:
             col_sel, _ = st.columns([1,1])
             aba_d = col_sel.selectbox("Aba Discador:", all_sheets, index=all_sheets.index(aba_d_audit) if aba_d_audit else 0)
@@ -215,55 +242,42 @@ if uploaded_file:
             sug_resp = next((c for c in cols_d if 'RESPONSAVEL' in c.upper()), cols_d[0])
             sug_prio = next((c for c in cols_d if 'PRIORIDADE' in c.upper() or 'AGING' in c.upper()), None)
 
-            with st.expander("⚙️ Configurar Colunas & Prioridade", expanded=True):
+            with st.expander("⚙️ Configurar Colunas & Balanceamento", expanded=True):
                 c1, c2 = st.columns(2)
                 sel_resp_d = c1.selectbox("Responsável:", cols_d, index=cols_d.index(sug_resp) if sug_resp in cols_d else 0)
                 sel_doc_d = c1.selectbox("CPF/CNPJ:", cols_d, index=cols_d.index(sug_doc) if sug_doc in cols_d else 0)
                 sel_id_d = c2.multiselect("ID Cliente:", cols_d, default=sug_id[:3])
                 sel_tel_d = c2.multiselect("Telefones:", cols_d, default=sug_tel)
                 
-                st.markdown("**⚖️ Balanceamento**")
                 aplicar_bal_d = st.checkbox("Distribuir leads sem dono?", value=True)
                 sel_prio_d = None
                 if aplicar_bal_d:
-                    sel_prio_d = st.selectbox("Coluna de Prioridade (Opcional):", ["(Sem Prioridade)"] + cols_d, index=cols_d.index(sug_prio)+1 if sug_prio in cols_d else 0)
-                    if sel_prio_d == "(Sem Prioridade)": sel_prio_d = None
+                    sel_prio_d = st.selectbox("Coluna de Prioridade (Opcional):", ["(Aleatório)"] + cols_d, index=cols_d.index(sug_prio)+1 if sug_prio in cols_d else 0)
+                    if sel_prio_d == "(Aleatório)": sel_prio_d = None
 
             if st.button("🚀 PROCESSAR DISCADOR", key='btn_d'):
                 with st.spinner("Processando..."):
                     df_trabalho = df_d.copy()
                     if aplicar_bal_d: df_trabalho, msg, _ = distribuir_leads_orfãos(df_trabalho, sel_resp_d, sel_prio_d)
-                    
                     df_res_d = processar_discador(df_trabalho, sel_id_d, sel_tel_d, sel_resp_d, sel_doc_d, sel_prio_d)
                     
                     st.markdown('<div class="preview-box">', unsafe_allow_html=True)
-                    st.subheader("🔎 Conferência Final (Raio-X)")
+                    st.subheader("🔎 Conferência Discador")
                     
-                    # ABAS DE CONFERÊNCIA
-                    conf1, conf2 = st.tabs(["📊 Distribuição (Manhã/Almoço)", "💎 Qualidade (Prioridades)"])
-                    
-                    with conf1:
-                        st.caption("Confirme se todos têm Frotistas (Manhã) e Freteiros (Almoço).")
-                        try:
-                            resumo = df_res_d.groupby([sel_resp_d, 'ESTRATEGIA_PERFIL']).size().unstack(fill_value=0)
-                            st.dataframe(resumo, use_container_width=True)
-                        except: st.write("Não foi possível gerar a tabela.")
-
-                    with conf2:
-                        if sel_prio_d:
-                            st.caption(f"Distribuição baseada na coluna: {sel_prio_d}")
-                            try:
-                                # Agrupa por Responsável e Prioridade para ver a justiça
-                                resumo_prio = df_res_d.groupby([sel_resp_d, sel_prio_d]).size().unstack(fill_value=0)
-                                st.dataframe(resumo_prio, use_container_width=True)
-                            except: st.write("Erro ao agrupar prioridades.")
-                        else:
-                            st.info("Nenhuma coluna de prioridade foi selecionada para análise.")
+                    # TABELA DISCADOR SIMPLIFICADA (PEDIDO DO USUÁRIO)
+                    try:
+                        # Conta IDs únicos para não contar o mesmo cliente 2x (verticalizado)
+                        resumo = df_res_d.groupby([sel_resp_d, 'ESTRATEGIA_PERFIL'])[sel_id_d[0]].nunique().unstack(fill_value=0)
+                        resumo['TOTAL CLIENTES'] = resumo.sum(axis=1)
+                        st.write("📊 **Total de Clientes por Perfil (Manhã vs Almoço):**")
+                        st.dataframe(resumo, use_container_width=True)
+                    except:
+                        st.write("Erro ao gerar tabela resumo. Verifique colunas de ID.")
                     
                     st.markdown('</div>', unsafe_allow_html=True)
 
                     zip_d = gerar_zip_dinamico(df_res_d, sel_resp_d, None, "DISCADOR") 
-                    st.download_button("📥 DOWNLOAD PACK DISCADOR (.ZIP)", zip_d, "Discador_Manha.zip", "application/zip", type="primary")
+                    st.download_button("📥 BAIXAR PACK DISCADOR", zip_d, "Discador_Manha.zip", "application/zip", type="primary")
 
         # --- MAILING ---
         with tab2:
@@ -282,7 +296,7 @@ if uploaded_file:
                 aplicar_bal_m = st.checkbox("Distribuir leads sem dono?", value=True, key='chk_bal_m')
                 sel_prio_m = None
                 if aplicar_bal_m:
-                    sel_prio_m = st.selectbox("Coluna de Prioridade:", ["(Aleatório)"] + cols_m, index=cols_m.index(sug_prio_m)+1 if sug_prio_m in cols_m else 0, key='m_prio')
+                    sel_prio_m = st.selectbox("Coluna de Prioridade (Para Balanceamento e Visualização):", ["(Aleatório)"] + cols_m, index=cols_m.index(sug_prio_m)+1 if sug_prio_m in cols_m else 0, key='m_prio')
                     if sel_prio_m == "(Aleatório)": sel_prio_m = None
             
             if st.button("📦 PROCESSAR MAILING", key='btn_m'):
@@ -292,27 +306,33 @@ if uploaded_file:
                     df_classificado = processar_distribuicao_mailing(df_trabalho_m, sel_doc_m, sel_resp_m)
                     
                     st.markdown('<div class="preview-box">', unsafe_allow_html=True)
-                    st.subheader("🔎 Conferência Visual")
+                    st.subheader("🔎 Conferência Mailing (Balanceamento)")
                     
-                    # ABAS DE CONFERÊNCIA TAMBÉM NO MAILING
-                    conf1_m, conf2_m = st.tabs(["📊 Distribuição", "💎 Qualidade (Prioridades)"])
+                    # TABELA MAILING DETALHADA (PEDIDO DO USUÁRIO)
+                    if sel_prio_m:
+                        try:
+                            # Pivot table contando clientes únicos por Prioridade
+                            resumo_prio = df_classificado.pivot_table(
+                                index=sel_resp_m, 
+                                columns=sel_prio_m, 
+                                values=sel_doc_m, 
+                                aggfunc='count', 
+                                fill_value=0
+                            )
+                            # Adiciona coluna de Total
+                            resumo_prio['TOTAL GERAL'] = resumo_prio.sum(axis=1)
+                            
+                            st.write(f"💎 **Distribuição por Prioridade ({sel_prio_m}):**")
+                            st.dataframe(resumo_prio, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"Erro na tabela de prioridade: {e}")
+                    else:
+                        st.info("Selecione uma coluna de Prioridade para ver o balanceamento detalhado.")
                     
-                    with conf1_m:
-                         resumo_m = df_classificado.groupby([sel_resp_m, 'PERFIL_CALCULADO']).size().unstack(fill_value=0)
-                         st.dataframe(resumo_m, use_container_width=True)
-                    
-                    with conf2_m:
-                        if sel_prio_m:
-                            try:
-                                resumo_prio_m = df_classificado.groupby([sel_resp_m, sel_prio_m]).size().unstack(fill_value=0)
-                                st.dataframe(resumo_prio_m, use_container_width=True)
-                            except: st.write("Erro na tabela.")
-                        else: st.info("Sem prioridade selecionada.")
-
                     st.markdown('</div>', unsafe_allow_html=True)
 
                     zip_m = gerar_zip_dinamico(df_classificado, sel_resp_m, "PERFIL_CALCULADO", "MAILING")
-                    st.download_button("📥 DOWNLOAD MAILING (.ZIP)", zip_m, "Mailing.zip", "application/zip", type="primary")
+                    st.download_button("📥 BAIXAR MAILING", zip_m, "Mailing.zip", "application/zip", type="primary")
 
     elif modo_operacao == "☀️ Tarde (Reprocessamento)":
         st.subheader("🔄 Feedback Tarde (14:00)")
