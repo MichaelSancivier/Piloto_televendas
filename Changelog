@@ -1,0 +1,14 @@
+# Changelog - Michelin Command Center
+
+## [1.0.0] - Versão de Produção (V64) - 2026-01-17
+### Adicionado
+- **Motor de Balanceamento Cirúrgico**: Garante equidade total (47/47) movendo registros de menor prioridade automaticamente.
+- **Super Limpador de Telefones**: Algoritmo recursivo que remove múltiplos prefixos '55', zeros à esquerda e corrige o 9º dígito.
+- **Botão de Limpeza**: Reset completo da interface via Session State na barra lateral.
+- **Dashboard de Auditoria**: 3 tabelas dinâmicas (Carteira, Perfil e Prioridades).
+- **Módulo de Reforço Independente**: Permite processar o Log da Tarde reinserindo o Mestre, sem depender de cache.
+
+### Corrigido
+- Erro de telefones com prefixo duplicado (`5555...`).
+- Sincronização mestre/escravo garantindo que o discador sempre siga o dono do mailing.
+- Geração de arquivos mesmo que vazios para manter o padrão de 8 outputs no ZIP.
