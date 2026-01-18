@@ -8,9 +8,9 @@ import numpy as np
 import random
 
 # ==============================================================================
-# 1. SETUP VISUAL
+# 1. SETUP VISUAL E CONFIGURAÇÃO
 # ==============================================================================
-st.set_page_config(page_title="Michelin Pilot V59 - Super Cleaner", page_icon="🚛", layout="wide")
+st.set_page_config(page_title="Michelin Pilot V60 - Final", page_icon="🚛", layout="wide")
 
 st.markdown("""
     <style>
@@ -24,56 +24,41 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. O SUPER LIMPADOR DE TELEFONES
+# 2. INTELIGÊNCIA DE LIMPEZA (SUPER CLEANER)
 # ==============================================================================
 
 def super_limpador_tel(val):
     if pd.isna(val): return None
-    # 1. Remove tudo que não é número
     nums = re.sub(r'\D', '', str(val).strip())
+    while nums.startswith('0'): nums = nums[1:]
+    while nums.startswith('55') and len(nums) > 11: nums = nums[2:]
     
-    # 2. Remove zeros à esquerda (ex: 011 -> 11)
-    while nums.startswith('0'):
-        nums = nums[1:]
-        
-    # 3. Loop para remover 55 repetidos (ex: 555511... -> 11...)
-    # Só remove se o número resultante ainda tiver tamanho de um tel nacional (10 ou 11)
-    while nums.startswith('55') and len(nums) > 11:
-        nums = nums[2:]
-        
-    # 4. Ajuste de comprimento e 9º dígito
-    if len(nums) == 11:
-        return f"+55{nums}"
+    if len(nums) == 11: return f"+55{nums}"
     elif len(nums) == 10:
-        # Se o DDD for de celular (geralmente > 11 e 3º dígito >= 6)
-        if int(nums[2]) >= 6: 
-            return f"+55{nums[:2]}9{nums[2:]}" # Injeta o 9
-        return f"+55{nums}" # Fixo
-    elif len(nums) > 11:
-        # Se ainda for grande, pega os últimos 11 (estratégia de segurança)
-        return f"+55{nums[-11:]}"
-    
+        if int(nums[2]) >= 6: return f"+55{nums[:2]}9{nums[2:]}"
+        return f"+55{nums}"
+    elif len(nums) > 11: return f"+55{nums[-11:]}"
     return None
 
-def limpar_id_v59(v):
+def limpar_id_v60(v):
     if pd.isna(v): return ""
     return re.sub(r'\D', '', str(v).split('.')[0])
 
-def obter_perfil_v59(v):
+def obter_perfil_v60(v):
     d = re.sub(r'\D', '', str(v))
     return "PEQUENO FROTISTA" if len(d) == 14 else "FRETEIRO"
 
-def converter_prio_v59(v):
+def converter_prio_v60(v):
     s = str(v).upper()
     if "BACKLOG" in s: return 99
     nums = re.findall(r'\d+', s)
     return int(nums[0]) if nums else 50
 
 # ==============================================================================
-# 3. MOTOR DE GERAÇÃO
+# 3. MOTOR DE EXPORTAÇÃO (8 ARQUIVOS + REFORÇO)
 # ==============================================================================
 
-def gerar_pacote_v59(df_m, df_d, col_resp, col_tels_d, df_ref=None):
+def gerar_pacote_v60(df_m, df_d, col_resp, col_tels_d, df_ref=None):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED, False) as zf:
         agentes = [a for a in df_m[col_resp].unique() if a not in ["SEM_MATCH", "SEM_DONO"]]
@@ -91,13 +76,12 @@ def gerar_pacote_v59(df_m, df_d, col_resp, col_tels_d, df_ref=None):
             d_ag = df_d[df_d['RESPONSAVEL_FINAL'] == ag]
             for perf, suf in [("PEQUENO FROTISTA", "MANHA_Frotista"), ("FRETEIRO", "ALMOCO_Freteiro")]:
                 sub_d = d_ag[d_ag['PERFIL_FINAL'] == perf]
-                if not sub_d.empty:
-                    ids_d = [c for c in sub_d.columns if any(x in c.upper() for x in ['ID', 'NOME', 'DOC', 'RESPONSAVEL', 'PERFIL'])]
-                    melted = sub_d.melt(id_vars=ids_d, value_vars=col_tels_d, value_name='TR')
-                    melted['Telefone'] = melted['TR'].apply(super_limpador_tel)
-                    final_d = melted.dropna(subset=['Telefone']).drop_duplicates(subset=['Telefone'])
-                    ex_d = io.BytesIO(); final_d.to_excel(ex_d, index=False)
-                    zf.writestr(f"{safe}_DISCADOR_{suf}.xlsx", ex_d.getvalue())
+                ids_d = [c for c in sub_d.columns if any(x in c.upper() for x in ['ID', 'NOME', 'DOC', 'RESPONSAVEL', 'PERFIL'])]
+                melted = sub_d.melt(id_vars=ids_d, value_vars=col_tels_d, value_name='TR')
+                melted['Telefone'] = melted['TR'].apply(super_limpador_tel)
+                final_d = melted.dropna(subset=['Telefone']).drop_duplicates(subset=['Telefone'])
+                ex_d = io.BytesIO(); final_d.to_excel(ex_d, index=False)
+                zf.writestr(f"{safe}_DISCADOR_{suf}.xlsx", ex_d.getvalue())
 
             # --- REFORÇO ---
             if df_ref is not None:
@@ -105,7 +89,6 @@ def gerar_pacote_v59(df_m, df_d, col_resp, col_tels_d, df_ref=None):
                 if not r_ag.empty:
                     ex_r = io.BytesIO(); r_ag.to_excel(ex_r, index=False)
                     zf.writestr(f"{safe}_DISCADOR_REFORCO_TARDE.xlsx", ex_r.getvalue())
-                    
     buf.seek(0)
     return buf
 
@@ -113,7 +96,7 @@ def gerar_pacote_v59(df_m, df_d, col_resp, col_tels_d, df_ref=None):
 # 4. INTERFACE
 # ==============================================================================
 
-st.title("Command Center Michelin V59 - Super Cleaner")
+st.title("🚛 Michelin Pilot Command Center V60")
 
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Michelin_Logo.svg/1200px-Michelin_Logo.svg.png", width=150)
@@ -128,7 +111,7 @@ if file_master:
     aba_m = next(s for s in xls.sheet_names if 'MAIL' in s.upper())
     df_m, df_d = pd.read_excel(file_master, aba_m), pd.read_excel(file_master, aba_d)
 
-    # Detecção Automática
+    # Detecção
     c_id_m = next(c for c in df_m.columns if 'ID_CONTRATO' in c.upper())
     c_id_d = next(c for c in df_d.columns if 'ID_CONTRATO' in c.upper())
     c_resp_m = next(c for c in df_m.columns if 'RESP' in c.upper())
@@ -136,49 +119,52 @@ if file_master:
     c_prio_m = next(c for c in df_m.columns if 'PRIOR' in c.upper())
     c_tels_d = [c for c in df_d.columns if any(x in c.upper() for x in ['TEL', 'CEL', 'PRINCIPAL', 'COMERCIAL'])]
 
-    # Tratamento Mailing
-    df_m['PERFIL_FINAL'] = df_m[c_doc_m].apply(obter_perfil_v59)
-    df_m['PRIO_SCORE'] = df_m[c_prio_m].apply(converter_prio_v59)
+    # Balanço
+    snap_ini = df_m[c_resp_m].value_counts().to_dict()
+    df_m['PERFIL_FINAL'] = df_m[c_doc_m].apply(obter_perfil_v60)
+    df_m['PRIO_SCORE'] = df_m[c_prio_m].apply(converter_prio_v60)
     
-    # Balanceio
     agentes = [a for a in df_m[c_resp_m].unique() if pd.notna(a) and "BACKLOG" not in str(a).upper()]
     mask_orfao = df_m[c_resp_m].isna() | (df_m[c_resp_m].astype(str).str.upper().str.contains("BACKLOG"))
     for idx in df_m[mask_orfao].index:
-        agente_menor = min(agentes, key=lambda x: df_m[c_resp_m].value_counts().get(x, 0))
-        df_m.at[idx, c_resp_m] = agente_menor
+        ag_menor = min(agentes, key=lambda x: df_m[c_resp_m].value_counts().get(x, 0))
+        df_m.at[idx, c_resp_m] = ag_menor
 
     # Sincronia
-    df_d['KEY'] = df_d[c_id_d].apply(limpar_id_v59)
-    map_resp = dict(zip(df_m[c_id_m].apply(limpar_id_v59), df_m[c_resp_m]))
-    map_perf = dict(zip(df_m[c_id_m].apply(limpar_id_v59), df_m['PERFIL_FINAL']))
+    df_d['KEY'] = df_d[c_id_d].apply(limpar_id_v60)
+    map_resp = dict(zip(df_m[c_id_m].apply(limpar_id_v60), df_m[c_resp_m]))
+    map_perf = dict(zip(df_m[c_id_m].apply(limpar_id_v60), df_m['PERFIL_FINAL']))
     df_d['RESPONSAVEL_FINAL'] = df_d['KEY'].map(map_resp).fillna("SEM_MATCH")
     df_d['PERFIL_FINAL'] = df_d['KEY'].map(map_perf).fillna("FRETEIRO")
 
-    # Lógica Tarde
     df_refuerzo = None
     if fase == "☀️ Tarde (Reforço)" and file_log:
         try:
             df_log = pd.read_csv(file_log, sep=None, engine='python') if file_log.name.endswith('.csv') else pd.read_excel(file_log)
-            ids_contactados = df_log[df_log.columns[0]].apply(limpar_id_v59).unique()
+            ids_contactados = df_log[df_log.columns[0]].apply(limpar_id_v60).unique()
             d_tarde = df_d[(df_d['PERFIL_FINAL'] == "PEQUENO FROTISTA") & (~df_d['KEY'].isin(ids_contactados))]
             ids_r = [c for c in d_tarde.columns if any(x in c.upper() for x in ['ID', 'NOME', 'DOC', 'RESPONSAVEL', 'PERFIL'])]
             melt_r = d_tarde.melt(id_vars=ids_r, value_vars=c_tels_d, value_name='TR')
             melt_r['Telefone'] = melt_r['TR'].apply(super_limpador_tel)
             df_refuerzo = melt_r.dropna(subset=['Telefone']).drop_duplicates(subset=['Telefone'])
             st.success(f"✅ Reforço Gerado: {len(df_refuerzo)} registros.")
-        except Exception as e:
-            st.error(f"Erro no Log: {e}")
+        except Exception as e: st.error(f"Erro no Log: {e}")
 
     # --- DASHBOARD ---
     st.subheader("📊 Auditoria de Cartera")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write("**Resumo por Atendente:**")
-        st.dataframe(df_m[c_resp_m].value_counts(), use_container_width=True)
-    with col2:
-        st.write("**Ma manhã (Frotista) / Almoço (Freteiro):**")
+    c1, c2 = st.columns(2)
+    with c1:
+        snap_fin = df_m[c_resp_m].value_counts().to_dict()
+        df_audit = pd.DataFrame([snap_ini, snap_fin], index=['Início', 'Final']).T.fillna(0)
+        st.write("**Balanceamento Cirúrgico:**")
+        st.dataframe(df_audit.style.format("{:.0f}"), use_container_width=True)
+    with c2:
+        st.write("**Perfis (Manhã/Almoço):**")
         st.dataframe(pd.crosstab(df_m[c_resp_m], df_m['PERFIL_FINAL'], margins=True), use_container_width=True)
+    
+    st.subheader("🔢 Detalhe de Prioridades")
+    st.dataframe(pd.crosstab(df_m[c_resp_m], df_m[c_prio_m], margins=True), use_container_width=True)
 
     st.markdown("---")
-    zip_kit = gerar_pacote_v59(df_m, df_d, c_resp_m, c_tels_d, df_refuerzo)
-    st.download_button("📥 DESCARREGAR KIT COMPLETO (V59)", zip_kit, "Michelin_Kit_V59.zip", "application/zip", type="primary")
+    zip_kit = gerar_pacote_v60(df_m, df_d, c_resp_m, c_tels_d, df_refuerzo)
+    st.download_button("📥 DESCARREGAR KIT COMPLETO (V60)", zip_kit, "Michelin_Kit_V60.zip", "application/zip", type="primary")
