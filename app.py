@@ -7,11 +7,10 @@ import unicodedata
 import numpy as np
 
 # ==============================================================================
-# 1. SETUP VISUAL Y ESTADO DE SESIÓN
+# 1. CONFIGURAÇÃO VISUAL E ESTADO DA SESSÃO
 # ==============================================================================
-st.set_page_config(page_title="Michelin Pilot V64 - Final", page_icon="🚛", layout="wide")
+st.set_page_config(page_title="Michelin Pilot V64 - Final Production", page_icon="🚛", layout="wide")
 
-# Inicializar memoria para que el botón de limpiar funcione
 if 'dados_prontos' not in st.session_state:
     st.session_state.dados_prontos = False
 
@@ -28,10 +27,11 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. FUNCIONES DE INTELIGENCIA
+# 2. FUNÇÕES DE INTELIGÊNCIA DE DADOS
 # ==============================================================================
 
 def super_limpador_tel(val):
+    """Limpa e formata telefones removendo múltiplos prefixos 55 e zeros."""
     if pd.isna(val): return None
     nums = re.sub(r'\D', '', str(val).strip())
     while nums.startswith('0'): nums = nums[1:]
@@ -43,25 +43,26 @@ def super_limpador_tel(val):
     elif len(nums) > 11: return f"+55{nums[-11:]}"
     return None
 
-def clean_id(v):
+def limpar_id(v):
     if pd.isna(v): return ""
     return re.sub(r'\D', '', str(v).split('.')[0])
 
-def get_perfil(v):
+def obter_perfil(v):
     d = re.sub(r'\D', '', str(v))
     return "PEQUENO FROTISTA" if len(d) == 14 else "FRETEIRO"
 
-def get_prio_score_v64(v):
+def converter_prio_v64(v):
+    """Atribui peso 100 ao Backlog para priorizar no balanceamento."""
     s = str(v).upper()
     if "BACKLOG" in s: return 100 
     nums = re.findall(r'\d+', s)
     return int(nums[0]) if nums else 50
 
 # ==============================================================================
-# 3. MOTOR DE GENERACIÓN
+# 3. MOTOR DE PROCESSAMENTO E GERAÇÃO
 # ==============================================================================
 
-def build_zip_v64(df_m, df_d, col_resp, col_tels_d, df_ref=None):
+def gerar_pacote_v64(df_m, df_d, col_resp, col_tels_d, df_ref=None):
     buf = io.BytesIO()
     total_tel_final = 0
     with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED, False) as zf:
@@ -72,10 +73,12 @@ def build_zip_v64(df_m, df_d, col_resp, col_tels_d, df_ref=None):
             d_ag = df_d[df_d['RESPONSAVEL_FINAL'] == ag]
             
             for perf, suf in [("PEQUENO FROTISTA", "MANHA_Frotista"), ("FRETEIRO", "ALMOCO_Freteiro")]:
+                # Mailing
                 sub_m = m_ag[m_ag['PERFIL_FINAL'] == perf]
                 ex_m = io.BytesIO(); sub_m.to_excel(ex_m, index=False)
                 zf.writestr(f"{safe}_MAILING_{suf}.xlsx", ex_m.getvalue())
 
+                # Discador com Verticalização
                 sub_d = d_ag[d_ag['PERFIL_FINAL'] == perf]
                 if not sub_d.empty:
                     ids_d = [c for c in sub_d.columns if any(x in c.upper() for x in ['ID', 'NOME', 'DOC', 'RESPONSAVEL', 'PERFIL'])]
@@ -95,16 +98,16 @@ def build_zip_v64(df_m, df_d, col_resp, col_tels_d, df_ref=None):
     return buf, total_tel_final
 
 # ==============================================================================
-# 4. INTERFAZ Y CONTROL
+# 4. INTERFACE DO USUÁRIO
 # ==============================================================================
 
-st.title("🚛 Command Center Michelin V64 - Final")
+st.title("🚛 Michelin Command Center - Dashboard de Produção")
 
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Michelin_Logo.svg/1200px-Michelin_Logo.svg.png", width=150)
-    fase = st.radio("Momento do Dia:", ["🌅 Manhã (Geração)", "☀️ Tarde (Reforço)"])
-    file_master = st.file_uploader("Arquivo Mestre", type="xlsx")
-    file_log = st.file_uploader("Log Discador (Tarde)", type=["csv", "xlsx"]) if fase == "☀️ Tarde (Reforço)" else None
+    fase = st.radio("Momento da Operação:", ["🌅 Manhã (Geração)", "☀️ Tarde (Reforço)"])
+    file_master = st.file_uploader("Subir Arquivo Mestre (Excel)", type="xlsx")
+    file_log = st.file_uploader("Subir Log do Discador (Tarde)", type=["csv", "xlsx"]) if fase == "☀️ Tarde (Reforço)" else None
 
     if st.session_state.dados_prontos:
         st.markdown("---")
@@ -119,6 +122,7 @@ if file_master:
     df_m = pd.read_excel(file_master, next(s for s in xls.sheet_names if 'MAIL' in s.upper()))
     df_d = pd.read_excel(file_master, next(s for s in xls.sheet_names if 'DISC' in s.upper()))
 
+    # Deteção Automática de Colunas
     c_id_m = next(c for c in df_m.columns if 'ID_CONTRATO' in c.upper())
     c_resp_m = next(c for c in df_m.columns if 'RESP' in c.upper())
     c_prio_m = next(c for c in df_m.columns if 'PRIOR' in c.upper())
@@ -126,10 +130,10 @@ if file_master:
     c_tels_d = [c for c in df_d.columns if any(x in c.upper() for x in ['TEL', 'CEL', 'PRINCIPAL', 'COMERCIAL'])]
 
     snap_ini = df_m[c_resp_m].value_counts().to_dict()
-    df_m['PERFIL_FINAL'] = df_m[c_doc_m].apply(get_perfil)
-    df_m['PRIO_SCORE'] = df_m[c_prio_m].apply(get_prio_score_v64)
+    df_m['PERFIL_FINAL'] = df_m[c_doc_m].apply(obter_perfil)
+    df_m['PRIO_SCORE'] = df_m[c_prio_m].apply(converter_prio_v64)
 
-    # Balanceo Quirúrgico
+    # Motor de Balanceamento Cirúrgico (Meta 47 por atendente)
     agentes = [a for a in df_m[c_resp_m].unique() if pd.notna(a) and "BACKLOG" not in str(a).upper()]
     mask_orfao = df_m[c_resp_m].isna() | (df_m[c_resp_m].astype(str).str.upper().str.contains("BACKLOG"))
     for idx in df_m[mask_orfao].index:
@@ -143,10 +147,10 @@ if file_master:
         idx_move = df_m[df_m[c_resp_m] == ag_max].sort_values('PRIO_SCORE', ascending=False).index[0]
         df_m.at[idx_move, c_resp_m] = ag_min
 
-    # Sincronia Discador
-    df_d['KEY'] = df_d[next(c for c in df_d.columns if 'ID_CONTRATO' in c.upper())].apply(clean_id)
-    map_resp = dict(zip(df_m[c_id_m].apply(clean_id), df_m[c_resp_m]))
-    map_perf = dict(zip(df_m[c_id_m].apply(clean_id), df_m['PERFIL_FINAL']))
+    # Sincronização de Chaves
+    df_d['KEY'] = df_d[next(c for c in df_d.columns if 'ID_CONTRATO' in c.upper())].apply(limpar_id)
+    map_resp = dict(zip(df_m[c_id_m].apply(limpar_id), df_m[c_resp_m]))
+    map_perf = dict(zip(df_m[c_id_m].apply(limpar_id), df_m['PERFIL_FINAL']))
     df_d['RESPONSAVEL_FINAL'] = df_d['KEY'].map(map_resp).fillna("SEM_MATCH")
     df_d['PERFIL_FINAL'] = df_d['KEY'].map(map_perf).fillna("FRETEIRO")
 
@@ -154,21 +158,21 @@ if file_master:
     if fase == "☀️ Tarde (Reforço)" and file_log:
         try:
             df_log = pd.read_csv(file_log, sep=None, engine='python') if file_log.name.endswith('.csv') else pd.read_excel(file_log)
-            ids_cont = df_log[df_log.columns[0]].apply(clean_id).unique()
+            ids_cont = df_log[df_log.columns[0]].apply(limpar_id).unique()
             d_tarde = df_d[(df_d['PERFIL_FINAL'] == "PEQUENO FROTISTA") & (~df_d['KEY'].isin(ids_cont))]
             ids_r = [c for c in d_tarde.columns if any(x in c.upper() for x in ['ID', 'NOME', 'DOC', 'RESPONSAVEL', 'PERFIL'])]
             melt_r = d_tarde.melt(id_vars=ids_r, value_vars=c_tels_d, value_name='TR')
             melt_r['Telefone'] = melt_r['TR'].apply(super_limpador_tel)
             df_ref = melt_r.dropna(subset=['Telefone']).drop_duplicates(subset=['Telefone'])
-            st.sidebar.success(f"✅ Reforço Tarde: {len(df_ref)} registros.")
-        except Exception as e: st.sidebar.error(f"Erro Log: {e}")
+            st.sidebar.success(f"✅ Reforço Gerado: {len(df_ref)} registros.")
+        except Exception as e: st.sidebar.error(f"Erro no Log: {e}")
 
-    # --- RESULTADOS ---
+    # Exibição de Resultados
     st.session_state.dados_prontos = True
-    st.subheader("📊 Auditoria de Cartera e Telefones")
-    zip_kit, total_telefones = build_zip_v64(df_m, df_d, c_resp_m, c_tels_d, df_ref)
+    st.subheader("📊 Auditoria de Carteira e Telefones")
+    zip_kit, total_telefones = gerar_pacote_v64(df_m, df_d, c_resp_m, c_tels_d, df_ref)
     
-    st.markdown(f'<div class="auto-info">🔍 <b>Resumo do Discador:</b> Verticalização gerou <b>{total_telefones} números válidos</b> únicos.</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="auto-info">🔍 <b>Resumo Técnico:</b> A verticalização gerou <b>{total_telefones} números válidos</b> únicos para discagem.</div>', unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -176,10 +180,10 @@ if file_master:
         df_audit = pd.DataFrame([snap_ini, df_m[c_resp_m].value_counts().to_dict()], index=['Início', 'Final']).T.fillna(0)
         st.dataframe(df_audit.style.format("{:.0f}"), use_container_width=True)
     with c2:
-        st.write("**Perfis (Ma manhã / Almoço):**")
+        st.write("**Divisão de Perfis:**")
         st.dataframe(pd.crosstab(df_m[c_resp_m], df_m['PERFIL_FINAL'], margins=True), use_container_width=True)
     
-    st.subheader("🔢 Detalhe Prioridades")
+    st.subheader("🔢 Detalhe de Prioridades")
     st.dataframe(pd.crosstab(df_m[c_resp_m], df_m[c_prio_m], margins=True), use_container_width=True)
 
-    st.download_button("📥 DESCARREGAR KIT COMPLETO (V64)", zip_kit, "Michelin_Kit_V64.zip", "application/zip", type="primary")
+    st.download_button("📥 BAIXAR KIT COMPLETO (V64)", zip_kit, "Michelin_Kit_V64_Producao.zip", "application/zip", type="primary")
